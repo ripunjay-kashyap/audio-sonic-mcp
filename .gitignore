@@ -1,0 +1,36 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.venv/
+env/
+venv/
+ENV/
+
+# Output directory
+stems/
+
+# Downloaded models (Demucs & CLAP — gigabytes, never commit)
+models/
+
+# Environment variables
+.env
+.env.*
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# Egg / dist / build
+*.egg-info/
+dist/
+build/
+
+# Platform-specific
+.DS_Store
+Thumbs.db

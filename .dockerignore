@@ -1,0 +1,29 @@
+# Environments
+.venv/
+venv/
+env/
+ENV/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Git
+.git/
+.gitignore
+
+# IDE / specific files
+.vscode/
+.claude/
+Audio_stem_splt.code-workspace
+
+# Audio output and models
+stems/
+models/
+tmp*/
+*tmp/
+*.wav
+*.mp3
+
+# Logs
+*.log
