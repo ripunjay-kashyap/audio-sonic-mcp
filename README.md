@@ -28,21 +28,38 @@ This project addresses both by wrapping a 6-stage AI audio processing pipeline i
 
 The pipeline is modular and idempotent, with built-in checkpointing for fault-tolerant execution across long-running batch jobs.
 
+
 ```text
-Raw Audio Source (URL)
-     |
-     v
-+----------------------------------------------------------+
-|  Stage 1 — Ingestion         Validation & Metadata       |
-|  Stage 2 — Download          yt-dlp (Audio Stream)       |
-|  Stage 3 — Convert           FFmpeg -> 44.1kHz WAV       |
-|  Stage 4 — Inference         Demucs (AI Separation)      |
-|  Stage 5 — Analysis          librosa (MIR Features)      |
-|  Stage 6 — Embedding         CLAP (Semantic Vectors)     |
-+----------------------------------------------------------+
-     |
-     v
-Structured JSON Payload (Stems + Sonic Signature + Telemetry)
+  LLM Agent / Claude Desktop
+           |
+           |  MCP (stdio)
+           v
++--------------------------------------------------------------------------+
+|  FastMCP Server  (server.py)                                             |
+|  split_audio · get_job_status · list_jobs · check_health                |
+|  asyncio.Lock (one job at a time)  +  in-memory job store               |
++----------------------------------+---------------------------------------+
+                                   |
+                                   v
++--------------------------------------------------------------------------+
+|  6-Stage Inference Pipeline                                              |
+|                                                                          |
+|  Stage 1 — Ingest      yt-dlp probe         -->  metadata.json          |
+|  Stage 2 — Download    yt-dlp audio stream  -->  raw audio file         |
+|  Stage 3 — Convert     FFmpeg               -->  44.1 kHz WAV           |
+|  Stage 4 — Separate    Demucs (htdemucs)    -->  4 stem WAVs            |
+|  Stage 5 — Analyze     librosa MIR          -->  BPM, key, peaks        |
+|  Stage 6 — Embed       CLAP (laion)         -->  512-dim vector         |
++----------------------------------+---------------------------------------+
+                                   |
+                                   v
++--------------------------------------------------------------------------+
+|  JSON Payload                                                            |
+|  header:           job_id, status, confidence_score, source_meta        |
+|  stems_metadata:   file paths, SDR quality metric                       |
+|  sonic_signature:  BPM, key, vibe_vector, production_profile            |
+|  telemetry:        inference_time_sec                                    |
++--------------------------------------------------------------------------+
 ```
 
 **Stage 1 — Ingestion:** URL validation and metadata probing via `yt-dlp`. Enforces a 60-minute duration limit and persists source metadata to disk atomically (tmp-rename pattern) to avoid re-probing on resume.
