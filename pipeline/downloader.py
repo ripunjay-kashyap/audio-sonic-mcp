@@ -5,6 +5,7 @@ Uses yt-dlp to pull only the audio stream (no video), saving ~70% bandwidth.
 
 import logging
 import subprocess
+from subprocess import DEVNULL
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -28,7 +29,8 @@ def download_audio(url: str, job_id: str, stems_root: Path) -> Path:
     cmd = [
         "yt-dlp",
         # Audio-only, best quality available
-        "--format", "bestaudio/best",
+        "--format",
+        "bestaudio/best",
         # Avoid video download entirely
         "--no-playlist",
         # Do not embed metadata (faster)
@@ -37,7 +39,8 @@ def download_audio(url: str, job_id: str, stems_root: Path) -> Path:
         "--newline",
         "--progress",
         # Output path
-        "--output", output_template,
+        "--output",
+        output_template,
         # No sponsorblock or chapters needed for audio analysis
         "--no-sponsorblock",
         url,
@@ -46,6 +49,7 @@ def download_audio(url: str, job_id: str, stems_root: Path) -> Path:
     logger.info("Downloading: %s", url)
     result = subprocess.run(
         cmd,
+        stdin=DEVNULL,
         capture_output=True,
         text=True,
         timeout=300,  # 5-minute cap
@@ -53,10 +57,7 @@ def download_audio(url: str, job_id: str, stems_root: Path) -> Path:
 
     if result.returncode != 0:
         stderr = result.stderr.strip()
-        raise RuntimeError(
-            f"yt-dlp download failed for '{url}'.\n"
-            f"stderr: {stderr}"
-        )
+        raise RuntimeError(f"yt-dlp download failed for '{url}'.\nstderr: {stderr}")
 
     # Find the downloaded file (extension varies: webm, m4a, opus, etc.)
     candidates = list(job_dir.glob("raw_audio.*"))

@@ -1,23 +1,25 @@
 # ── MCP Framework ─────────────────────────────────────────────────────────────
-mcp>=1.0.0
+mcp==1.27.0
 
 # ── Audio Download ─────────────────────────────────────────────────────────────
-yt-dlp>=2024.1.0
+yt-dlp==2026.3.17
 
 # ── Audio Processing ───────────────────────────────────────────────────────────
-librosa>=0.10.0
-soundfile>=0.12.0
-numpy>=1.24.0
-scipy>=1.11.0
+librosa==0.11.0
+soundfile==0.13.1
+numpy==2.4.4
+scipy==1.17.1
 
 # ── Stem Separation ────────────────────────────────────────────────────────────
-demucs>=4.0.0
-
-# ── CLAP Vibe Vector (optional but recommended) ────────────────────────────────
-# transformers>=4.38.0
-# torch>=2.0.0
-# torchaudio>=2.0.0
+demucs==4.0.1
 
 # ── Utilities ──────────────────────────────────────────────────────────────────
-psutil>=5.9.0       # CPU telemetry
-aiofiles>=23.0.0
+psutil==7.2.2       # CPU telemetry
+
+# ── CLAP Vibe Vector (optional — ~4 GB download) ──────────────────────────────
+# Install separately when needed:
+#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+#   pip install transformers
+# transformers==4.x.x
+# torch==2.x.x
+# torchaudio==2.x.x

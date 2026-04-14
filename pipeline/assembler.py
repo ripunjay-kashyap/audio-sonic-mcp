@@ -3,9 +3,6 @@ Final Stage — Context Assembly
 Bundles all pipeline outputs into the canonical JSON-RPC payload.
 """
 
-import os
-import time
-import uuid
 from pathlib import Path
 from typing import Any
 
@@ -32,11 +29,12 @@ def assemble_payload(
             "job_id": job_id,
             "status": "success",
             "confidence_score": confidence,
-            "source": {
+            "source_metadata": {
                 "title": source_info.get("title"),
                 "uploader": source_info.get("uploader"),
                 "duration_sec": source_info.get("duration_sec"),
                 "url": source_info.get("webpage_url"),
+                "genre_hint": source_info.get("genre_hint"),
             },
         },
         "stems_metadata": {
@@ -47,6 +45,7 @@ def assemble_payload(
         "sonic_signature": {
             "bpm": features["bpm"],
             "key": features["key"],
+            "mode_confidence": features.get("mode_confidence"),
             "vibe_vector": vibe_vector,
             "production_profile": {
                 "vocal_presence": features["vocal_presence_label"],
@@ -81,5 +80,5 @@ def _confidence_score(sdr: float, features: dict) -> float:
     if features.get("key") in (None, "Unknown"):
         feature_score -= 0.10
 
-    combined = (sdr_score * 0.6 + feature_score * 0.4)
+    combined = sdr_score * 0.6 + feature_score * 0.4
     return round(min(max(combined, 0.0), 1.0), 2)

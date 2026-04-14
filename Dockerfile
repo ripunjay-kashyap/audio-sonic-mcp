@@ -17,6 +17,9 @@ ENV STEMS_ROOT=/app/stems
 
 WORKDIR /app
 
+# Create non-root user early so we can assign ownership
+RUN useradd -m -u 1000 appuser
+
 # Install system dependencies required by soundfile, etc.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -28,19 +31,26 @@ COPY --from=ffmpeg /ffmpeg /usr/local/bin/
 COPY --from=ffmpeg /ffprobe /usr/local/bin/
 
 # Install Python dependencies
-# 1. Install CPU-only torch to save space
-RUN pip install --no-cache-dir torch torchaudio transformers --index-url https://download.pytorch.org/whl/cpu
-
-# 2. Install remaining requirements
+# 1. Install base requirements first
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Create necessary directories for mounting
-RUN mkdir -p /app/stems /app/models/torch /app/models/huggingface
+# 2. Install CPU-only torch/transformers (large; kept separate for layer caching)
+RUN pip install --no-cache-dir torch torchaudio transformers --index-url https://download.pytorch.org/whl/cpu
 
-# Copy server code
-COPY . /app
+# Create mount-point directories and hand ownership to appuser
+RUN mkdir -p /app/stems /app/models/torch /app/models/huggingface && \
+    chown -R appuser:appuser /app
 
-# The MCP inspector typically uses stdio communication. 
-# We run the FastMCP app directly or via MCP CLI.
+# Copy server code and fix ownership
+COPY --chown=appuser:appuser . /app
+
+# Drop to non-root
+USER appuser
+
+# Liveness probe: verify Python imports and FFmpeg are functional
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+    CMD python -c "import librosa, demucs, mcp; import subprocess, sys; sys.exit(0 if subprocess.run(['ffmpeg','-version'], capture_output=True).returncode == 0 else 1)"
+
+# The MCP server communicates over stdio.
 ENTRYPOINT ["python", "server.py"]

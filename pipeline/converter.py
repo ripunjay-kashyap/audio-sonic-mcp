@@ -6,12 +6,13 @@ htdemucs expects for best-quality separation.
 
 import logging
 import subprocess
+from subprocess import DEVNULL
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 TARGET_SAMPLE_RATE = 44100
-TARGET_CHANNELS = 2   # stereo
+TARGET_CHANNELS = 2  # stereo
 TARGET_BIT_DEPTH = "s16"  # signed 16-bit PCM
 
 
@@ -33,24 +34,33 @@ def convert_to_wav(raw_audio_path: Path) -> Path:
 
     cmd = [
         "ffmpeg",
-        "-y",                          # overwrite output
-        "-i", str(raw_audio_path),     # input file
-        "-vn",                         # strip any video stream
-        "-acodec", "pcm_s16le",        # PCM 16-bit little-endian
-        "-ar", str(TARGET_SAMPLE_RATE),# 44.1kHz
-        "-ac", str(TARGET_CHANNELS),   # stereo
-        "-af", "aresample=resampler=soxr",  # high-quality resampler
-        "-map_metadata", "-1",         # strip metadata (clean slate)
+        "-y",  # overwrite output
+        "-i",
+        str(raw_audio_path),  # input file
+        "-vn",  # strip any video stream
+        "-acodec",
+        "pcm_s16le",  # PCM 16-bit little-endian
+        "-ar",
+        str(TARGET_SAMPLE_RATE),  # 44.1kHz
+        "-ac",
+        str(TARGET_CHANNELS),  # stereo
+        "-af",
+        "aresample=resampler=soxr",  # high-quality resampler
+        "-map_metadata",
+        "-1",  # strip metadata (clean slate)
         str(wav_path),
     ]
 
     logger.info(
         "Converting %s → %s @ %dHz stereo …",
-        raw_audio_path.name, wav_path.name, TARGET_SAMPLE_RATE,
+        raw_audio_path.name,
+        wav_path.name,
+        TARGET_SAMPLE_RATE,
     )
 
     result = subprocess.run(
         cmd,
+        stdin=DEVNULL,
         capture_output=True,
         text=True,
         timeout=120,

@@ -59,32 +59,75 @@ On Windows use the `.venv\Scripts\python.exe` path.
 
 ## Testing
 
-There are no automated tests. To smoke-test the server interactively:
+Run the unit test suite (synthetic audio, no real downloads needed):
+
+```bash
+pytest                   # runs tests/ suite
+pytest -v tests/         # verbose
+```
+
+For a full end-to-end smoke test via the MCP client:
+
+```bash
+python smoke_test.py                          # uses a default YouTube URL
+python smoke_test.py <url> <job_id>           # custom URL + job ID
+```
+
+Interactive inspector:
 
 ```bash
 # Requires mcp[cli] — install with: pip install "mcp[cli]"
 mcp dev server.py
 ```
 
-This opens a browser-based MCP inspector where you can call `split_audio`, `get_job_status`, and `list_jobs` directly. The server logs to stderr — watch that terminal for pipeline stage progress.
+This opens a browser-based MCP inspector where you can call tools directly. The server logs to stderr — watch that terminal for pipeline stage progress.
 
-## Docker
+## Container (Podman)
 
-A Dockerfile is provided to run the server in a containerized environment with a CPU-optimized `torch` build and statically compiled FFmpeg.
+This project uses **Podman** (rootless, daemonless). The Dockerfile is standard OCI-compatible — no changes needed.
+
+### Prerequisites (Windows)
+Podman runs via WSL on Windows. Ensure the machine is running:
+```bash
+podman machine start   # only needed if not already running
+podman machine list    # verify status
+```
 
 ### Build
 ```bash
-docker build -t audio-stem-mcp .
+podman build -t audio-stem-mcp .
 ```
 
 ### Run
-**Important:** Demucs and CLAP will download gigabytes of pre-trained models on their first run. To prevent models from being downloaded every time the container restarts, you **must** mount a volume to `/app/models`.
+**Important:** Demucs and CLAP will download gigabytes of pre-trained models on their first run. Mount volumes so models persist across container restarts.
 
 ```bash
 # Create local directories for persistence
 mkdir -p stems models
 
 # Run the container with volumes
+podman run -it --rm \
+  -v $(pwd)/stems:/app/stems:Z \
+  -v $(pwd)/models:/app/models:Z \
+  audio-stem-mcp
+```
+
+> The `:Z` suffix sets the SELinux label so the container can write to the host directories. Omitting it causes permission errors on SELinux-enabled systems.
+
+### MCP Inspector inside container
+```bash
+podman run -it --rm \
+  -v $(pwd)/stems:/app/stems:Z \
+  -v $(pwd)/models:/app/models:Z \
+  -p 5173:5173 -p 3000:3000 \
+  --entrypoint mcp \
+  audio-stem-mcp dev server.py
+```
+
+### Docker compatibility
+The same commands work with `docker` by dropping the `:Z` suffix:
+```bash
+docker build -t audio-stem-mcp .
 docker run -it --rm \
   -v $(pwd)/stems:/app/stems \
   -v $(pwd)/models:/app/models \
@@ -105,7 +148,7 @@ The pipeline is linear — each stage feeds into the next, all orchestrated by `
 | 6 — Vectorize | `vectorizer.py` | CLAP 512-dim embedding via `laion/larger_clap_music_and_speech`; falls back to a librosa mel+MFCC composite if CLAP is unavailable |
 | Assemble | `assembler.py` | Merges all outputs into the canonical JSON payload |
 
-All pipeline stages run via `asyncio.to_thread()` in `server.py` — they are synchronous functions wrapped for async execution.
+All pipeline stages run via `anyio.to_thread.run_sync()` in `server.py` — they are synchronous functions wrapped for async execution.
 
 ## Job Store
 
@@ -116,12 +159,21 @@ Jobs are tracked in an in-memory dict `JOB_STORE` in `server.py`. It is not pers
 - `split_audio(url, job_id?, model?)` — runs the full pipeline
 - `get_job_status(job_id)` — fetches result from `JOB_STORE`
 - `list_jobs()` — lists all job statuses
+- `check_health()` — verifies FFmpeg, yt-dlp, and Python package availability
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `STEMS_ROOT` | `/tmp/audio_stems` | Root directory for all downloaded and separated audio files |
+
+## Gotchas
+
+**Fast Resume:** If `STEMS_ROOT/<job_id>/stems/` already contains all 4 stem WAVs, stages 2–4 (download, convert, split) are skipped automatically. Useful for re-analyzing without re-downloading; remove the stems directory to force a full re-run.
+
+**Concurrency:** A global `asyncio.Lock` (`CONCURRENCY_LOCK`) serializes all Demucs/ML jobs — only one job runs at a time. Concurrent `split_audio` calls queue behind the lock.
+
+**CLAP install shorthand:** `pip install ".[clap]"` (uses the extras group in `pyproject.toml`) is equivalent to the manual `pip install transformers torch torchaudio`.
 
 ## Demucs Model Options
 

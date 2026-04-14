@@ -1,0 +1,138 @@
+"""Tests for pipeline/ingestion.py — URL validation and yt-dlp metadata probe."""
+
+import json
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from pipeline.ingestion import _is_direct_audio, validate_source
+
+
+# ── _is_direct_audio ──────────────────────────────────────────────────────────
+
+
+class TestIsDirectAudio:
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://cdn.example.com/track.mp3",
+            "https://cdn.example.com/track.wav",
+            "https://cdn.example.com/track.flac",
+            "https://cdn.example.com/track.ogg",
+            "https://cdn.example.com/track.m4a",
+            "https://cdn.example.com/track.aac",
+            "https://cdn.example.com/track.MP3",  # case-insensitive
+            "https://cdn.example.com/track.mp3?token=abc",  # query string
+        ],
+    )
+    def test_recognised_audio_extensions(self, url):
+        assert _is_direct_audio(url) is True
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://www.youtube.com/watch?v=abc123",
+            "https://cdn.example.com/page.html",
+            "https://cdn.example.com/image.jpg",
+            "https://cdn.example.com/audio",  # no extension
+        ],
+    )
+    def test_non_audio_urls(self, url):
+        assert _is_direct_audio(url) is False
+
+
+# ── validate_source ───────────────────────────────────────────────────────────
+
+
+class TestValidateSource:
+    def _mock_yt_dlp(self, meta: dict, returncode: int = 0, stderr: str = ""):
+        result = MagicMock()
+        result.returncode = returncode
+        result.stdout = json.dumps(meta) if returncode == 0 else ""
+        result.stderr = stderr
+        return result
+
+    def test_invalid_url_format_raises(self):
+        with pytest.raises(ValueError, match="Invalid URL format"):
+            validate_source("not-a-url")
+
+    def test_missing_scheme_raises(self):
+        with pytest.raises(ValueError, match="Invalid URL format"):
+            validate_source("www.youtube.com/watch?v=abc")
+
+    def test_unsupported_host_raises(self):
+        with pytest.raises(ValueError, match="Unsupported source"):
+            validate_source("https://soundcloud.com/artist/track")
+
+    def test_valid_youtube_url_returns_metadata(self):
+        meta = {
+            "title": "Test Track",
+            "duration": 180,
+            "uploader": "Test Artist",
+            "thumbnail": "https://img.example.com/thumb.jpg",
+            "webpage_url": "https://www.youtube.com/watch?v=test123",
+            "extractor": "youtube",
+        }
+        with patch(
+            "pipeline.ingestion.subprocess.run", return_value=self._mock_yt_dlp(meta)
+        ):
+            result = validate_source("https://www.youtube.com/watch?v=test123")
+
+        assert result["title"] == "Test Track"
+        assert result["duration_sec"] == 180
+        assert result["uploader"] == "Test Artist"
+        assert result["extractor"] == "youtube"
+
+    @pytest.mark.parametrize(
+        "host",
+        [
+            "https://youtu.be/abc123",
+            "https://music.youtube.com/watch?v=abc",
+            "https://m.youtube.com/watch?v=abc",
+        ],
+    )
+    def test_all_supported_youtube_hosts_accepted(self, host):
+        meta = {"title": "T", "duration": 60, "uploader": "U"}
+        with patch(
+            "pipeline.ingestion.subprocess.run", return_value=self._mock_yt_dlp(meta)
+        ):
+            result = validate_source(host)
+        assert result["duration_sec"] == 60
+
+    def test_yt_dlp_failure_raises_runtime_error(self):
+        mock = self._mock_yt_dlp({}, returncode=1, stderr="Video unavailable")
+        with patch("pipeline.ingestion.subprocess.run", return_value=mock):
+            with pytest.raises(RuntimeError, match="yt-dlp failed"):
+                validate_source("https://www.youtube.com/watch?v=invalid")
+
+    def test_duration_over_limit_raises(self):
+        meta = {"title": "Long", "duration": 3700, "uploader": "Artist"}
+        with patch(
+            "pipeline.ingestion.subprocess.run", return_value=self._mock_yt_dlp(meta)
+        ):
+            with pytest.raises(ValueError, match="60-minute limit"):
+                validate_source("https://www.youtube.com/watch?v=long")
+
+    def test_duration_exactly_at_limit_is_allowed(self):
+        meta = {"title": "Edge", "duration": 3600, "uploader": "Artist"}
+        with patch(
+            "pipeline.ingestion.subprocess.run", return_value=self._mock_yt_dlp(meta)
+        ):
+            result = validate_source("https://www.youtube.com/watch?v=edge")
+        assert result["duration_sec"] == 3600
+
+    def test_direct_audio_url_bypasses_host_check(self):
+        meta = {"title": "Direct", "duration": 120, "uploader": "Unknown"}
+        with patch(
+            "pipeline.ingestion.subprocess.run", return_value=self._mock_yt_dlp(meta)
+        ):
+            result = validate_source("https://cdn.example.com/track.mp3")
+        assert result["title"] == "Direct"
+
+    def test_missing_duration_does_not_raise(self):
+        meta = {"title": "No Duration", "uploader": "Artist"}  # no "duration" key
+        with patch(
+            "pipeline.ingestion.subprocess.run", return_value=self._mock_yt_dlp(meta)
+        ):
+            result = validate_source("https://www.youtube.com/watch?v=nodur")
+        assert result["duration_sec"] == 0

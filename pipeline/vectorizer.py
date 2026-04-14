@@ -37,10 +37,10 @@ def generate_vibe_vector(stems_dir: Path, stem_files: list[str]) -> list[float]:
 
 # ── CLAP path ─────────────────────────────────────────────────────────────────
 
+
 def _clap_vector(stems_dir: Path, stem_files: list[str]) -> list[float]:
     from transformers import ClapModel, ClapProcessor
     import torch
-    import soundfile as sf
 
     logger.info("Loading CLAP model: %s", CLAP_MODEL_ID)
     processor = ClapProcessor.from_pretrained(CLAP_MODEL_ID)
@@ -60,6 +60,7 @@ def _clap_vector(stems_dir: Path, stem_files: list[str]) -> list[float]:
 
 
 # ── Librosa fallback ──────────────────────────────────────────────────────────
+
 
 def _librosa_fallback_vector(stems_dir: Path, stem_files: list[str]) -> list[float]:
     """
@@ -87,12 +88,12 @@ def _librosa_fallback_vector(stems_dir: Path, stem_files: list[str]) -> list[flo
     # MFCCs
     mfccs = librosa.feature.mfcc(y=y, sr=22050, n_mfcc=40)
     features.extend(mfccs.mean(axis=1).tolist())
-    features.extend(mfccs.std(axis=1).tolist())   # 80
+    features.extend(mfccs.std(axis=1).tolist())  # 80
 
     # Chroma
     chroma = librosa.feature.chroma_stft(y=y, sr=22050)
     features.extend(chroma.mean(axis=1).tolist())
-    features.extend(chroma.std(axis=1).tolist())   # 24
+    features.extend(chroma.std(axis=1).tolist())  # 24
 
     # Spectral features
     for feat in [
@@ -103,12 +104,12 @@ def _librosa_fallback_vector(stems_dir: Path, stem_files: list[str]) -> list[flo
         librosa.feature.zero_crossing_rate(y),
     ]:
         features.append(float(feat.mean()))
-        features.append(float(feat.std()))           # 10
+        features.append(float(feat.std()))  # 10
 
-    # Tonnetz
-    tonnetz = librosa.feature.tonnetz(y=librosa.effects.harmonic(y), sr=22050)
+    # Tonnetz (uses the raw mix instead of expensive HPSS since Demucs is already handling separation in earlier stages)
+    tonnetz = librosa.feature.tonnetz(y=y, sr=22050)
     features.extend(tonnetz.mean(axis=1).tolist())
-    features.extend(tonnetz.std(axis=1).tolist())   # 12
+    features.extend(tonnetz.std(axis=1).tolist())  # 12
 
     # Pad / trim to exactly 512 dims
     if len(features) < VECTOR_DIM:
@@ -127,6 +128,7 @@ def _librosa_fallback_vector(stems_dir: Path, stem_files: list[str]) -> list[flo
 
 
 # ── Shared utility ────────────────────────────────────────────────────────────
+
 
 def _load_mix(stems_dir: Path, stem_files: list[str], sr: int) -> np.ndarray:
     """Loads and mixes all stems into a single mono array at given sample rate."""

@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=72", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "audio-stem-mcp"
+version = "1.0.0"
+description = "MCP server that separates YouTube audio into stems and produces a sonic signature JSON"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp==1.27.0",
+    "yt-dlp==2026.3.17",
+    "librosa==0.11.0",
+    "soundfile==0.13.1",
+    "numpy==2.4.4",
+    "scipy==1.17.1",
+    "demucs==4.0.1",
+    "psutil==7.2.2",
+]
+
+[project.optional-dependencies]
+clap = [
+    "torch>=2.0.0",
+    "torchaudio>=2.0.0",
+    "transformers>=4.38.0",
+]
+dev = [
+    "pytest==8.3.5",
+    "pytest-asyncio==0.24.0",
+]
+
+[project.scripts]
+audio-stem-mcp = "server:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["pipeline*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.setuptools]
+py-modules = ["server"]

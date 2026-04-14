@@ -34,3 +34,20 @@ build/
 # Platform-specific
 .DS_Store
 Thumbs.db
+
+# Test & Lint Caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Tool-specific (Agent / Session state)
+.claude/
+
+# Audio Fail-safe (ignore any audio files not in specifically tracked folders)
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.m4a
+*.aac

@@ -9,7 +9,8 @@ vs. original energy — a heuristic that avoids needing ground-truth references.
 
 import logging
 import subprocess
-import shutil
+import sys
+from subprocess import DEVNULL
 from pathlib import Path
 from typing import Tuple
 
@@ -37,11 +38,17 @@ def split_stems(
     output_root = stems_root / job_id / "stems"
     output_root.mkdir(parents=True, exist_ok=True)
 
+    # Use demucs_runner.py wrapper which patches torchaudio.save() to use
+    # soundfile instead of torchcodec (avoids FFmpeg shared-library requirement).
+    runner = Path(__file__).with_name("demucs_runner.py")
+
     cmd = [
-        "python", "-m", "demucs",
+        sys.executable,
+        str(runner),
         f"--name={model}",
         f"--out={output_root}",
-        "--filename", "{stem}.wav",
+        "--filename",
+        "{stem}.wav",
         str(wav_path),
     ]
 
@@ -50,6 +57,7 @@ def split_stems(
 
     result = subprocess.run(
         cmd,
+        stdin=DEVNULL,
         capture_output=True,
         text=True,
         timeout=1200,  # 20-minute hard cap
@@ -57,8 +65,7 @@ def split_stems(
 
     if result.returncode != 0:
         raise RuntimeError(
-            f"Demucs failed.\nModel: {model}\n"
-            f"stderr: {result.stderr[-3000:]}"
+            f"Demucs failed.\nModel: {model}\nstderr: {result.stderr[-3000:]}"
         )
 
     # ── Locate output stems ───────────────────────────────────────────────────
@@ -75,6 +82,7 @@ def split_stems(
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
 
 def _find_stems_dir(output_root: Path, model: str) -> Path:
     """Finds wherever Demucs actually dropped the stem files."""
@@ -105,9 +113,7 @@ def _verify_stems(stems_dir: Path) -> list[str]:
             missing.append(f"{name}.wav")
 
     if missing:
-        raise FileNotFoundError(
-            f"Missing expected stems in {stems_dir}: {missing}"
-        )
+        raise FileNotFoundError(f"Missing expected stems in {stems_dir}: {missing}")
 
     return found
 
@@ -140,7 +146,7 @@ def _compute_proxy_sdr(
         residual = orig[:min_len] - mixed[:min_len]
 
         signal_power = np.mean(orig[:min_len] ** 2) + 1e-10
-        noise_power = np.mean(residual ** 2) + 1e-10
+        noise_power = np.mean(residual**2) + 1e-10
         sdr = float(10 * np.log10(signal_power / noise_power))
         return round(sdr, 2)
 

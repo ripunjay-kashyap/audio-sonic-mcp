@@ -3,15 +3,21 @@ Stage 1 — Ingestion & Validation
 Validates that the URL is a supported source and reachable.
 """
 
+import os
 import re
 import subprocess
 import json
+from pathlib import Path
+from subprocess import DEVNULL
 from urllib.parse import urlparse
 
 
 SUPPORTED_HOSTS = {
-    "youtube.com", "www.youtube.com", "youtu.be",
-    "music.youtube.com", "m.youtube.com",
+    "youtube.com",
+    "www.youtube.com",
+    "youtu.be",
+    "music.youtube.com",
+    "m.youtube.com",
 }
 
 
@@ -42,6 +48,7 @@ def validate_source(url: str) -> dict:
             "--quiet",
             url,
         ],
+        stdin=DEVNULL,
         capture_output=True,
         text=True,
         timeout=30,
@@ -50,8 +57,7 @@ def validate_source(url: str) -> dict:
     if result.returncode != 0:
         stderr = result.stderr.strip()
         raise RuntimeError(
-            f"yt-dlp failed to probe '{url}'. "
-            f"Reason: {stderr or 'unknown error'}"
+            f"yt-dlp failed to probe '{url}'. Reason: {stderr or 'unknown error'}"
         )
 
     try:
@@ -66,6 +72,9 @@ def validate_source(url: str) -> dict:
             "Please use a shorter clip."
         )
 
+    categories = meta.get("categories") or []
+    genre_hint = categories[0] if categories else None
+
     return {
         "title": meta.get("title", "Unknown"),
         "duration_sec": duration,
@@ -73,7 +82,38 @@ def validate_source(url: str) -> dict:
         "thumbnail": meta.get("thumbnail"),
         "webpage_url": meta.get("webpage_url", url),
         "extractor": meta.get("extractor", "unknown"),
+        "genre_hint": genre_hint,
     }
+
+
+def save_metadata(job_dir: Path, info: dict) -> None:
+    """
+    Atomically persists source metadata to disk alongside the stems.
+    Uses a .tmp → rename pattern to prevent partial-write corruption.
+    """
+    job_dir.mkdir(parents=True, exist_ok=True)
+    target = job_dir / "metadata.json"
+    tmp = job_dir / "metadata.json.tmp"
+    try:
+        tmp.write_text(json.dumps(info, indent=2, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, target)  # atomic on POSIX; near-atomic on Windows NTFS
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def load_metadata(job_dir: Path) -> dict | None:
+    """
+    Loads cached source metadata from disk.
+    Returns None if the file does not exist or is malformed.
+    """
+    path = job_dir / "metadata.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
 
 
 def _is_direct_audio(url: str) -> bool:
