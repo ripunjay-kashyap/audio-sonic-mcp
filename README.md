@@ -1,6 +1,16 @@
 # Audio Stem Splitter & Analyzer — MCP Server
 
-A production-grade, LLM-callable machine learning pipeline for audio source separation and Music Information Retrieval (MIR). Built as a Model Context Protocol (MCP) server, it makes state-of-the-art deep learning models programmatically accessible to AI agents and LLM orchestration frameworks.
+A local demonstration of an LLM-callable machine learning pipeline for audio source separation and Music Information Retrieval (MIR). Built as a Model Context Protocol (MCP) server, it makes state-of-the-art deep learning models programmatically accessible to AI agents and LLM orchestration frameworks.
+
+---
+
+## Project Status
+
+This is a custom-mcp project running on consumer-grade hardware, not a hosted service.
+
+**Hardware constraint:** Demucs and CLAP run on CPU only on the development machine. A 5-minute track takes approximately 10–15 minutes end-to-end. Production deployment at reasonable throughput would require a dedicated GPU instance (e.g. AWS `g5.xlarge` with an A10G, or equivalent GCP/Azure GPU tier) — cost-prohibitive for personal hosting.
+
+**What this project demonstrates:** ML pipeline architecture, integration of multiple deep learning models (Demucs, CLAP), async system design for high-latency inference workloads, and MCP server implementation. The bottleneck is hardware budget, not software design — the same codebase runs in minutes on GPU.
 
 ---
 
@@ -57,7 +67,7 @@ Structured JSON Payload (Stems + Sonic Signature + Telemetry)
 
 ### The Constraint
 
-Demucs and CLAP are computationally heavy. On consumer-grade hardware (without A100/H100 access), processing a 4-minute track can require 10–15 minutes of continuous execution. Standard synchronous request-response patterns are not viable.
+Demucs and CLAP are computationally heavy. This project runs on a local CPU — the tested environment — where processing a 5-minute track takes approximately 10–15 minutes end-to-end. Standard synchronous request-response patterns are not viable at these latencies.
 
 ### The Solutions
 
@@ -136,27 +146,7 @@ The `confidence_score` is a weighted heuristic: 60% SDR separation quality + 40%
 
 ## Quick Start
 
-### Containerized Deployment (Recommended)
-
-Container deployment avoids CUDA/PyTorch version conflicts and system dependency issues.
-
-```bash
-# Build the image
-docker build -t audio-stem-mcp .
-
-# Create persistent directories for outputs and ML model weights
-mkdir -p stems models
-
-# Run the server (volumes persist large model weights across restarts)
-docker run -it --rm \
-  -v $(pwd)/stems:/app/stems \
-  -v $(pwd)/models:/app/models \
-  audio-stem-mcp
-```
-
-Note: initial startup downloads approximately 4–6 GB of PyTorch model weights.
-
-### Local Development
+### Local Development (Tested)
 
 ```bash
 python -m venv .venv
@@ -171,6 +161,19 @@ pytest -v tests/
 
 # Full end-to-end smoke test
 python smoke_test.py <youtube_url>
+```
+
+### Containerized Deployment (Untested on Development Hardware)
+
+A Dockerfile is included for environments with GPU access. Cloud GPU deployment (e.g. AWS `g5`, GCP `n1` with T4) is out of scope for this project due to cost, but the container is structured to support it.
+
+```bash
+docker build -t audio-stem-mcp .
+mkdir -p stems models
+docker run -it --rm \
+  -v $(pwd)/stems:/app/stems \
+  -v $(pwd)/models:/app/models \
+  audio-stem-mcp
 ```
 
 ### Claude Desktop Integration
