@@ -11,7 +11,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
-def download_audio(url: str, job_id: str, stems_root: Path) -> Path:
+def download_audio(url: str, job_id: str, jobs_root: Path) -> Path:
     """
     Downloads the best available audio stream from the given URL.
     Returns the path to the downloaded raw audio file.
@@ -21,7 +21,7 @@ def download_audio(url: str, job_id: str, stems_root: Path) -> Path:
     - No video mux: skips the heavy video track entirely
     - Output is saved to a per-job temp directory
     """
-    job_dir = stems_root / job_id
+    job_dir = jobs_root / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
 
     output_template = str(job_dir / "raw_audio.%(ext)s")

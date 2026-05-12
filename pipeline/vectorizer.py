@@ -1,6 +1,6 @@
 """
-Stage 6 — Vibe Vectorization
-Passes stems through a local CLAP (Contrastive Language-Audio Pretraining)
+Stage 5 — Vibe Vectorization
+Passes the WAV file through a local CLAP (Contrastive Language-Audio Pretraining)
 model to generate a 512-dimension semantic embedding — the "Vibe Vector."
 
 CLAP maps audio into the same latent space as text, enabling similarity
@@ -20,49 +20,57 @@ CLAP_MODEL_ID = "laion/larger_clap_music_and_speech"
 VECTOR_DIM = 512
 
 
-def generate_vibe_vector(stems_dir: Path, stem_files: list[str]) -> list[float]:
+def generate_vibe_vector(wav_path: Path) -> list[float]:
     """
-    Generates a 512-dim vibe vector from the stem mix.
+    Generates a 512-dim vibe vector from the input WAV file.
 
     Strategy:
     1. Try CLAP (laion/larger_clap_music_and_speech) via transformers
     2. Fallback: librosa mel-spectrogram embedding (mean-pooled, PCA-reduced)
     """
     try:
-        return _clap_vector(stems_dir, stem_files)
+        return _clap_vector(wav_path)
     except Exception as exc:
         logger.warning("CLAP unavailable (%s). Falling back to librosa embedding.", exc)
-        return _librosa_fallback_vector(stems_dir, stem_files)
+        return _librosa_fallback_vector(wav_path)
 
 
 # ── CLAP path ─────────────────────────────────────────────────────────────────
 
 
-def _clap_vector(stems_dir: Path, stem_files: list[str]) -> list[float]:
+def _clap_vector(wav_path: Path) -> list[float]:
     from transformers import ClapModel, ClapProcessor
     import torch
 
-    logger.info("Loading CLAP model: %s", CLAP_MODEL_ID)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    logger.info("Loading CLAP model: %s (device=%s)", CLAP_MODEL_ID, device)
     processor = ClapProcessor.from_pretrained(CLAP_MODEL_ID)
-    model = ClapModel.from_pretrained(CLAP_MODEL_ID)
+    model = ClapModel.from_pretrained(CLAP_MODEL_ID).to(device)
     model.eval()
 
-    # Mix all stems into a single mono signal for CLAP
-    mix = _load_mix(stems_dir, stem_files, sr=48000)
+    audio = _load_audio(wav_path, sr=48000)
 
-    inputs = processor(audios=[mix], sampling_rate=48000, return_tensors="pt")
+    inputs = processor(audio=[audio], sampling_rate=48000, return_tensors="pt")
+    inputs = {k: v.to(device) for k, v in inputs.items()}
     with torch.no_grad():
-        embeddings = model.get_audio_features(**inputs)
+        raw = model.get_audio_features(**inputs)
 
-    vec = embeddings[0].numpy().tolist()
+    # Unwrap output objects (transformers ≥5.x may return a dataclass)
+    if hasattr(raw, 'audio_embeds'):
+        raw = raw.audio_embeds
+    elif hasattr(raw, 'pooler_output'):
+        raw = raw.pooler_output
+
+    arr = raw.detach().cpu().numpy().reshape(-1)
+    vec = arr.tolist()
     logger.info("CLAP vector generated: %d dims", len(vec))
-    return [round(v, 6) for v in vec]
+    return [round(float(v), 6) for v in vec]
 
 
 # ── Librosa fallback ──────────────────────────────────────────────────────────
 
 
-def _librosa_fallback_vector(stems_dir: Path, stem_files: list[str]) -> list[float]:
+def _librosa_fallback_vector(wav_path: Path) -> list[float]:
     """
     Generates a compact 512-dim representation using:
     - Mel-spectrogram statistics (mean + std across time for 128 bands = 256 dims)
@@ -74,8 +82,8 @@ def _librosa_fallback_vector(stems_dir: Path, stem_files: list[str]) -> list[flo
     """
     import librosa
 
-    mix = _load_mix(stems_dir, stem_files, sr=22050)
-    y = mix.astype(np.float32)
+    y = _load_audio(wav_path, sr=22050)
+    y = y.astype(np.float32)
 
     features: list[float] = []
 
@@ -106,7 +114,7 @@ def _librosa_fallback_vector(stems_dir: Path, stem_files: list[str]) -> list[flo
         features.append(float(feat.mean()))
         features.append(float(feat.std()))  # 10
 
-    # Tonnetz (uses the raw mix instead of expensive HPSS since Demucs is already handling separation in earlier stages)
+    # Tonnetz
     tonnetz = librosa.feature.tonnetz(y=y, sr=22050)
     features.extend(tonnetz.mean(axis=1).tolist())
     features.extend(tonnetz.std(axis=1).tolist())  # 12
@@ -130,21 +138,29 @@ def _librosa_fallback_vector(stems_dir: Path, stem_files: list[str]) -> list[flo
 # ── Shared utility ────────────────────────────────────────────────────────────
 
 
-def _load_mix(stems_dir: Path, stem_files: list[str], sr: int) -> np.ndarray:
-    """Loads and mixes all stems into a single mono array at given sample rate."""
+def _load_audio(wav_path: Path, sr: int) -> np.ndarray:
+    """Loads the analysis-window slice of a WAV as a mono float32 array.
+    See ``pipeline.window`` for window selection (offset + duration vary
+    with track length). Uses soundfile directly to avoid librosa's audioread
+    fallback, which spawns FFmpeg and deadlocks when stdin is an MCP pipe.
+    """
+    import soundfile as sf
     import librosa
+    from pipeline.window import pick_window
 
-    mix = None
-    for fname in stem_files:
-        path = stems_dir / fname
-        y, _ = librosa.load(str(path), sr=sr, mono=True)
-        mix = y if mix is None else mix[: len(y)] + y[: len(mix)]
+    with sf.SoundFile(str(wav_path)) as snd:
+        native_sr = snd.samplerate
+        offset_frames, frames_to_read = pick_window(snd.frames, native_sr)
+        snd.seek(offset_frames)
+        raw = snd.read(frames=frames_to_read, dtype="float32", always_2d=True)
 
-    if mix is None:
-        return np.zeros(sr * 10, dtype=np.float32)
+    # raw: (frames, channels) → mono
+    y = librosa.to_mono(raw.T)
+    if native_sr != sr:
+        y = librosa.resample(y, orig_sr=native_sr, target_sr=sr)
 
     # Peak normalize
-    peak = np.max(np.abs(mix))
+    peak = np.max(np.abs(y))
     if peak > 0:
-        mix /= peak
-    return mix
+        y /= peak
+    return y

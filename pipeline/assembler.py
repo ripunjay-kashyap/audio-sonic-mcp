@@ -3,15 +3,11 @@ Final Stage — Context Assembly
 Bundles all pipeline outputs into the canonical JSON-RPC payload.
 """
 
-from pathlib import Path
 from typing import Any
 
 
 def assemble_payload(
     job_id: str,
-    stems_dir: Path,
-    stem_files: list[str],
-    sdr: float,
     features: dict[str, Any],
     vibe_vector: list[float],
     inference_time: float,
@@ -22,7 +18,7 @@ def assemble_payload(
     Assembles the canonical JSON response payload.
     """
     cpu_avg = _cpu_avg(cpu_samples)
-    confidence = _confidence_score(sdr, features)
+    confidence = _confidence_score(features)
 
     return {
         "header": {
@@ -37,11 +33,6 @@ def assemble_payload(
                 "genre_hint": source_info.get("genre_hint"),
             },
         },
-        "stems_metadata": {
-            "local_root": str(stems_dir) + "/",
-            "files": stem_files,
-            "sdr_ratio": sdr,
-        },
         "sonic_signature": {
             "bpm": features["bpm"],
             "key": features["key"],
@@ -49,7 +40,7 @@ def assemble_payload(
             "vibe_vector": vibe_vector,
             "production_profile": {
                 "vocal_presence": features["vocal_presence_label"],
-                "drum_transient_punch": features["transient_punch"],
+                "transient_punch": features["transient_punch"],
                 "stereo_width": features["stereo_width_label"],
                 "dominant_freq_peaks_hz": features.get("freq_peaks_hz", {}),
             },
@@ -67,12 +58,12 @@ def _cpu_avg(samples: list[float]) -> float:
     return sum(samples) / len(samples)
 
 
-def _confidence_score(sdr: float, features: dict) -> float:
+def _confidence_score(features: dict) -> float:
     """
-    Heuristic confidence based on SDR quality and feature extraction success.
-    SDR of 8+ → high confidence; below 4 → low.
+    Heuristic confidence based on mode_confidence and feature extraction success.
+    mode_confidence is the primary signal (CQT chroma correlation quality).
     """
-    sdr_score = min(max((sdr - 2) / 10.0, 0.0), 1.0)
+    mode_conf = float(features.get("mode_confidence") or 0.0)
 
     feature_score = 1.0
     if features.get("bpm", 0) == 0:
@@ -80,5 +71,5 @@ def _confidence_score(sdr: float, features: dict) -> float:
     if features.get("key") in (None, "Unknown"):
         feature_score -= 0.10
 
-    combined = sdr_score * 0.6 + feature_score * 0.4
+    combined = mode_conf * 0.6 + feature_score * 0.4
     return round(min(max(combined, 0.0), 1.0), 2)

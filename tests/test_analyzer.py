@@ -1,34 +1,27 @@
 """Tests for pipeline/analyzer.py — BPM, key, transient punch, freq peaks, etc."""
 
 import numpy as np
-import soundfile as sf
 import pytest
 
 from pipeline.analyzer import (
-    analyze_stems,
+    analyze_audio,
     _detect_key,
     _dominant_frequencies,
     _extract_bpm,
     _stereo_width_label,
     _transient_punch,
-    _vocal_presence,
+    _vocal_presence_estimate,
 )
 
 SR = 44100
 
 
-# ── analyze_stems (integration) ───────────────────────────────────────────────
+# ── analyze_audio (integration) ───────────────────────────────────────────────
 
 
-class TestAnalyzeStems:
-    def test_empty_stem_files_raises_value_error(self, tmp_path):
-        with pytest.raises(ValueError, match="No stem files were loaded"):
-            analyze_stems(tmp_path, [])
-
-    def test_returns_all_expected_keys(self, stems_dir):
-        result = analyze_stems(
-            stems_dir, ["vocals.wav", "drums.wav", "bass.wav", "other.wav"]
-        )
+class TestAnalyzeAudio:
+    def test_returns_all_expected_keys(self, audio_wav):
+        result = analyze_audio(audio_wav)
         assert set(result.keys()) == {
             "bpm",
             "key",
@@ -39,73 +32,33 @@ class TestAnalyzeStems:
             "vocal_presence_label",
         }
 
-    def test_bpm_is_non_negative(self, stems_dir):
-        result = analyze_stems(
-            stems_dir, ["vocals.wav", "drums.wav", "bass.wav", "other.wav"]
-        )
-        assert result["bpm"] >= 0  # pure sine stems may yield 0; real audio always > 0
-
-    def test_key_is_non_empty_string(self, stems_dir):
-        result = analyze_stems(
-            stems_dir, ["vocals.wav", "drums.wav", "bass.wav", "other.wav"]
-        )
-        assert isinstance(result["key"], str) and result["key"]
-
-    def test_mode_confidence_in_0_1_range(self, stems_dir):
-        result = analyze_stems(
-            stems_dir, ["vocals.wav", "drums.wav", "bass.wav", "other.wav"]
-        )
-        assert 0.0 <= result["mode_confidence"] <= 1.0
-
-    def test_transient_punch_in_0_1_range(self, stems_dir):
-        result = analyze_stems(
-            stems_dir, ["vocals.wav", "drums.wav", "bass.wav", "other.wav"]
-        )
-        assert 0.0 <= result["transient_punch"] <= 1.0
-
-    def test_freq_peaks_has_entry_per_stem(self, stems_dir):
-        result = analyze_stems(
-            stems_dir, ["vocals.wav", "drums.wav", "bass.wav", "other.wav"]
-        )
-        assert set(result["freq_peaks_hz"].keys()) == {
-            "vocals",
-            "drums",
-            "bass",
-            "other",
-        }
-
-    def test_stereo_width_label_is_valid(self, stems_dir):
-        result = analyze_stems(
-            stems_dir, ["vocals.wav", "drums.wav", "bass.wav", "other.wav"]
-        )
-        assert result["stereo_width_label"] in ("mono", "narrow", "medium", "wide")
-
-    def test_vocal_presence_label_is_valid(self, stems_dir):
-        result = analyze_stems(
-            stems_dir, ["vocals.wav", "drums.wav", "bass.wav", "other.wav"]
-        )
-        assert result["vocal_presence_label"] in ("forward", "balanced", "recessed")
-
-    def test_works_without_drums_stem(self, tmp_path):
-        """Falls back to another stem for BPM when drums is absent."""
-        t = np.linspace(0, 4, SR * 4, endpoint=False)
-        signal = (np.sin(2 * np.pi * 440 * t) * 0.5).astype(np.float32)
-        stereo = np.stack([signal, signal], axis=1)
-        for name in ["vocals", "bass", "other"]:
-            sf.write(str(tmp_path / f"{name}.wav"), stereo, SR)
-
-        result = analyze_stems(tmp_path, ["vocals.wav", "bass.wav", "other.wav"])
+    def test_bpm_is_non_negative(self, audio_wav):
+        result = analyze_audio(audio_wav)
         assert result["bpm"] >= 0
 
-    def test_works_without_harmonic_stems(self, tmp_path):
-        """Falls back gracefully when vocals/other/bass are all absent."""
-        t = np.linspace(0, 4, SR * 4, endpoint=False)
-        signal = (np.sin(2 * np.pi * 100 * t) * 0.5).astype(np.float32)
-        stereo = np.stack([signal, signal], axis=1)
-        sf.write(str(tmp_path / "drums.wav"), stereo, SR)
+    def test_key_is_non_empty_string(self, audio_wav):
+        result = analyze_audio(audio_wav)
+        assert isinstance(result["key"], str) and result["key"]
 
-        result = analyze_stems(tmp_path, ["drums.wav"])
-        assert isinstance(result["key"], str)
+    def test_mode_confidence_in_0_1_range(self, audio_wav):
+        result = analyze_audio(audio_wav)
+        assert 0.0 <= result["mode_confidence"] <= 1.0
+
+    def test_transient_punch_in_0_1_range(self, audio_wav):
+        result = analyze_audio(audio_wav)
+        assert 0.0 <= result["transient_punch"] <= 1.0
+
+    def test_freq_peaks_has_harmonic_and_percussive(self, audio_wav):
+        result = analyze_audio(audio_wav)
+        assert set(result["freq_peaks_hz"].keys()) == {"harmonic", "percussive"}
+
+    def test_stereo_width_label_is_valid(self, audio_wav):
+        result = analyze_audio(audio_wav)
+        assert result["stereo_width_label"] in ("mono", "narrow", "medium", "wide")
+
+    def test_vocal_presence_label_is_valid(self, audio_wav):
+        result = analyze_audio(audio_wav)
+        assert result["vocal_presence_label"] in ("forward", "present", "background")
 
 
 # ── _extract_bpm ──────────────────────────────────────────────────────────────
@@ -147,21 +100,25 @@ class TestDetectKey:
     def test_returns_major_or_minor_string(self):
         t = np.linspace(0, 4, SR * 4, endpoint=False)
         y = np.sin(2 * np.pi * 261.63 * t).astype(np.float32)  # C4
-        key, confidence = _detect_key({"bass": y, "other": y}, SR)
+        key, confidence = _detect_key(y, SR)
         assert "Major" in key or "Minor" in key
 
     def test_contains_known_pitch_class(self):
         classes = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
         t = np.linspace(0, 4, SR * 4, endpoint=False)
         y = np.sin(2 * np.pi * 440 * t).astype(np.float32)
-        key, confidence = _detect_key({"bass": y, "other": y}, SR)
+        key, confidence = _detect_key(y, SR)
         assert any(key.startswith(p) for p in classes)
 
     def test_confidence_in_0_1_range(self):
         t = np.linspace(0, 4, SR * 4, endpoint=False)
         y = np.sin(2 * np.pi * 440 * t).astype(np.float32)
-        _, confidence = _detect_key({"bass": y, "other": y}, SR)
+        _, confidence = _detect_key(y, SR)
         assert 0.0 <= confidence <= 1.0
+
+    def test_empty_signal_returns_unknown(self):
+        _, confidence = _detect_key(np.array([]), SR)
+        assert confidence == 0.0
 
 
 # ── _transient_punch ──────────────────────────────────────────────────────────
@@ -213,50 +170,38 @@ class TestStereoWidthLabel:
     def test_identical_channels_is_mono(self):
         t = np.linspace(0, 1, SR, endpoint=False)
         ch = np.sin(2 * np.pi * 440 * t).astype(np.float32)
-        stems = {"drums": np.stack([ch, ch])}
-        assert _stereo_width_label(stems, SR) == "mono"
+        assert _stereo_width_label(np.stack([ch, ch]), SR) == "mono"
 
     def test_mono_signal_1d_returns_mono(self):
         t = np.linspace(0, 1, SR, endpoint=False)
         y = np.sin(2 * np.pi * 440 * t).astype(np.float32)
-        assert _stereo_width_label({"other": y}, SR) == "mono"
+        # 1D array — treated as mono
+        assert _stereo_width_label(np.stack([y, y]), SR) == "mono"
 
     def test_uncorrelated_channels_is_wide_or_medium(self):
         rng = np.random.default_rng(1)
         left = rng.standard_normal(SR).astype(np.float32)
         right = rng.standard_normal(SR).astype(np.float32)
-        stems = {"drums": np.stack([left, right])}
-        assert _stereo_width_label(stems, SR) in ("medium", "wide")
-
-    def test_falls_back_to_other_when_drums_absent(self):
-        t = np.linspace(0, 1, SR, endpoint=False)
-        ch = np.sin(2 * np.pi * 440 * t).astype(np.float32)
-        stems = {"other": np.stack([ch, ch])}
-        assert _stereo_width_label(stems, SR) == "mono"
+        assert _stereo_width_label(np.stack([left, right]), SR) in ("medium", "wide")
 
 
-# ── _vocal_presence ───────────────────────────────────────────────────────────
+# ── _vocal_presence_estimate ──────────────────────────────────────────────────
 
 
-class TestVocalPresence:
-    def _make_stems(self, vocal_scale, other_scale):
-        t = np.linspace(0, 1, SR, endpoint=False)
-        base = np.sin(2 * np.pi * 440 * t).astype(np.float32)
-        return {
-            "vocals": base * vocal_scale,
-            "drums": base * other_scale,
-            "bass": base * other_scale,
-            "other": base * other_scale,
-        }
-
+class TestVocalPresenceEstimate:
     def test_returns_valid_label(self):
-        stems = self._make_stems(0.5, 0.5)
-        assert _vocal_presence(stems, SR) in ("forward", "balanced", "recessed")
+        t = np.linspace(0, 1, SR, endpoint=False)
+        y = np.sin(2 * np.pi * 1000 * t).astype(np.float32)
+        assert _vocal_presence_estimate(y, SR) in ("forward", "present", "background")
 
-    def test_loud_vocals_are_forward(self):
-        stems = self._make_stems(1.0, 0.01)
-        assert _vocal_presence(stems, SR) == "forward"
+    def test_vocal_band_energy_gives_forward(self):
+        # Pure 1kHz tone sits squarely in the vocal band (200Hz–4kHz)
+        t = np.linspace(0, 2, SR * 2, endpoint=False)
+        y = np.sin(2 * np.pi * 1000 * t).astype(np.float32)
+        assert _vocal_presence_estimate(y, SR) == "forward"
 
-    def test_quiet_vocals_are_recessed(self):
-        stems = self._make_stems(0.01, 1.0)
-        assert _vocal_presence(stems, SR) == "recessed"
+    def test_sub_bass_gives_background(self):
+        # 40 Hz is below the vocal band
+        t = np.linspace(0, 2, SR * 2, endpoint=False)
+        y = np.sin(2 * np.pi * 40 * t).astype(np.float32)
+        assert _vocal_presence_estimate(y, SR) == "background"

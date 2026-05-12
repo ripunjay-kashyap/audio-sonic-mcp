@@ -20,7 +20,7 @@ WORKDIR /app
 # Create non-root user early so we can assign ownership
 RUN useradd -m -u 1000 appuser
 
-# Install system dependencies required by soundfile, etc.
+# Install system dependencies required by soundfile
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     libsndfile1 \
@@ -35,7 +35,7 @@ COPY --from=ffmpeg /ffprobe /usr/local/bin/
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 2. Install CPU-only torch/transformers (large; kept separate for layer caching)
+# 2. Install CPU-only torch/transformers for optional CLAP vibe vector (~4 GB)
 RUN pip install --no-cache-dir torch torchaudio transformers --index-url https://download.pytorch.org/whl/cpu
 
 # Create mount-point directories and hand ownership to appuser

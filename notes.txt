@@ -1,0 +1,8 @@
+After the cached sig and fixes are done.
+Test it again by fetching 3 youtube links
+1. High BPM hip hop
+2. Low BPM acoustic/ballad
+3. Middle ground
+
+Then run the pipeline and fetch the ground truth and compare.
+Let me know after the comparision. 

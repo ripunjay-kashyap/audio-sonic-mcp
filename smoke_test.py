@@ -64,16 +64,16 @@ async def main():
             result = await session.call_tool("list_jobs", {})
             print_result("list_jobs", result)
 
-            # 3. split_audio (Fast Resume)
-            print(f"\n>>> split_audio  url={URL} job_id={JOB_ID}")
+            # 3. get_sonic_signature (Fast Resume if input.wav exists)
+            print(f"\n>>> get_sonic_signature  url={URL} job_id={JOB_ID}")
             print("    (Starting full production pipeline...)")
             result = await asyncio.wait_for(
                 session.call_tool(
-                    "split_audio", {"url": URL, "job_id": JOB_ID, "model": "htdemucs"}
+                    "get_sonic_signature", {"url": URL, "job_id": JOB_ID}
                 ),
                 timeout=3600,
             )
-            print_result("split_audio", result)
+            print_result("get_sonic_signature", result)
 
             # Extract job_id from response
             job_id = None
@@ -96,4 +96,10 @@ async def main():
             print_result("list_jobs", result)
 
 
+import time as _time
+_t0 = _time.perf_counter()
 asyncio.run(main())
+_elapsed = _time.perf_counter() - _t0
+print(f"\n{'=' * 60}")
+print(f"  WALL-CLOCK TOTAL: {_elapsed:.1f}s  ({_elapsed / 60:.1f} min)")
+print(f"{'=' * 60}")

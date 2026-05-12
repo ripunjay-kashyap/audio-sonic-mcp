@@ -4,25 +4,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-An MCP (Model Context Protocol) server that accepts a YouTube URL and returns separated audio stems (vocals, drums, bass, other) plus a structured JSON "sonic signature" containing BPM, musical key, stereo width, transient punch, dominant frequencies, and a 512-dim CLAP vibe vector.
+An MCP (Model Context Protocol) server that accepts a YouTube URL and returns a structured **sonic signature** JSON — giving an LLM like Claude rich musical context (BPM, key, 512-dim CLAP embedding, production profile) from a single tool call.
 
 ## System Requirements
 
 - Python 3.10+
 - FFmpeg (must be on PATH)
 - yt-dlp (installed via pip)
-- Demucs (installed via pip)
-- Optional: `transformers`, `torch`, `torchaudio` for CLAP vibe vectors (~4GB download)
+- Optional: `transformers`, `torch`, `torchaudio` for CLAP vibe vectors (~4 GB download)
 
 ## Setup
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
+.venv\Scripts\activate      # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
 # Optional: CLAP vibe vectors
-pip install transformers torch torchaudio
+pip install ".[clap]"
 ```
 
 ## Running the Server
@@ -30,12 +29,11 @@ pip install transformers torch torchaudio
 ```bash
 python server.py
 
-# Custom stems output directory
-STEMS_ROOT=/data/stems python server.py
+# Custom job directory
+JOBS_ROOT=/data/jobs python server.py
 ```
 
 The server communicates over stdio (MCP protocol) — running it directly prints nothing useful interactively. Use Claude Desktop or an MCP client to exercise the tools.
-
 
 ## Claude Desktop Integration
 
@@ -44,11 +42,11 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS)
 ```json
 {
   "mcpServers": {
-    "audio-stem-mcp": {
+    "audio-sonic-mcp": {
       "command": "/path/to/.venv/bin/python",
-      "args": ["/path/to/audio-stem-mcp/server.py"],
+      "args": ["/path/to/server.py"],
       "env": {
-        "STEMS_ROOT": "/tmp/audio_stems"
+        "JOBS_ROOT": "/tmp/audio_jobs"
       }
     }
   }
@@ -69,86 +67,72 @@ pytest -v tests/         # verbose
 For a full end-to-end smoke test via the MCP client:
 
 ```bash
-python smoke_test.py                          # uses a default YouTube URL
-python smoke_test.py <url> <job_id>           # custom URL + job ID
+python smoke_test.py                    # uses a default YouTube URL
+python smoke_test.py <url> <job_id>     # custom URL + job ID
 ```
 
-Interactive inspector:
+### Accuracy regression tests (real song stems)
+
+`tests/test_accuracy.py` validates BPM (within 5%) and key (exact match) against ground-truth values from Songstats for a curated set of songs. Tests load cached Demucs stems from `jobs/<slug>/stems/mdx_extra/input/` — no network calls, ~1s per song. If stems aren't cached, the test is skipped.
+
+To populate the cache for all songs, run each URL once with `KEEP_JOB_FILES=1` and the canonical slug as the job ID:
 
 ```bash
-# Requires mcp[cli] — install with: pip install "mcp[cli]"
-mcp dev server.py
+$env:KEEP_JOB_FILES="1"  # Windows PowerShell; on bash: export KEEP_JOB_FILES=1
+.venv\Scripts\python.exe smoke_test.py "https://www.youtube.com/watch?v=fXivMSJm_kA"  sig_yukon
+.venv\Scripts\python.exe smoke_test.py "https://www.youtube.com/watch?v=tvTRZJ-4EyI"  sig_humble
+.venv\Scripts\python.exe smoke_test.py "https://www.youtube.com/watch?v=jLQrk6rmX6w"  sig_somebody
+.venv\Scripts\python.exe smoke_test.py "https://www.youtube.com/watch?v=iwd8N6K-sLk"  sig_exo_tempo
+.venv\Scripts\python.exe smoke_test.py "https://www.youtube.com/watch?v=0PTU4kGj5JI"  sig_lauv_julia
+.venv\Scripts\python.exe smoke_test.py "https://www.youtube.com/watch?v=kON9fn01rUQ"  sig_ballad
+.venv\Scripts\python.exe smoke_test.py "https://www.youtube.com/watch?v=r_0JjYUe5jo"  sig_hiphop
 ```
 
-This opens a browser-based MCP inspector where you can call tools directly. The server logs to stderr — watch that terminal for pipeline stage progress.
+Each run takes ~3-4 min (full Demucs separation). After populating, `pytest tests/test_accuracy.py -v` runs the full suite in seconds. The URL and ground-truth values are pinned in `GROUND_TRUTH` at the top of the test file — update both together when adding new songs.
 
 ## Container (Podman)
 
-This project uses **Podman** (rootless, daemonless). The Dockerfile is standard OCI-compatible — no changes needed.
+This project uses **Podman** (rootless, daemonless). The Dockerfile is standard OCI-compatible.
 
 ### Prerequisites (Windows)
-Podman runs via WSL on Windows. Ensure the machine is running:
 ```bash
 podman machine start   # only needed if not already running
 podman machine list    # verify status
 ```
 
-### Build
+### Build & Run
 ```bash
-podman build -t audio-stem-mcp .
-```
+podman build -t audio-sonic-mcp .
 
-### Run
-**Important:** Demucs and CLAP will download gigabytes of pre-trained models on their first run. Mount volumes so models persist across container restarts.
-
-```bash
-# Create local directories for persistence
-mkdir -p stems models
-
-# Run the container with volumes
 podman run -it --rm \
-  -v $(pwd)/stems:/app/stems:Z \
+  -v $(pwd)/jobs:/app/jobs:Z \
   -v $(pwd)/models:/app/models:Z \
-  audio-stem-mcp
+  audio-sonic-mcp
 ```
 
-> The `:Z` suffix sets the SELinux label so the container can write to the host directories. Omitting it causes permission errors on SELinux-enabled systems.
-
-### MCP Inspector inside container
-```bash
-podman run -it --rm \
-  -v $(pwd)/stems:/app/stems:Z \
-  -v $(pwd)/models:/app/models:Z \
-  -p 5173:5173 -p 3000:3000 \
-  --entrypoint mcp \
-  audio-stem-mcp dev server.py
-```
-
-### Docker compatibility
-The same commands work with `docker` by dropping the `:Z` suffix:
-```bash
-docker build -t audio-stem-mcp .
-docker run -it --rm \
-  -v $(pwd)/stems:/app/stems \
-  -v $(pwd)/models:/app/models \
-  audio-stem-mcp
-```
+> The `:Z` suffix sets the SELinux label. Drop it for Docker.
 
 ## Architecture
 
 The pipeline is linear — each stage feeds into the next, all orchestrated by `server.py`:
 
 | Stage | File | Responsibility |
-|-------|------|---------------|
+|---|---|---|
 | 1 — Validate | `ingestion.py` | URL validation + yt-dlp metadata probe; enforces 60-min limit |
-| 2 — Download | `downloader.py` | yt-dlp audio-only download to `STEMS_ROOT/<job_id>/` |
+| 2 — Download | `downloader.py` | yt-dlp audio-only download to `JOBS_ROOT/<job_id>/` |
 | 3 — Convert | `converter.py` | FFmpeg → 44.1kHz WAV |
-| 4 — Split | `splitter.py` | Demucs stem separation; handles both flat and nested output layouts; computes proxy SDR |
-| 5 — Analyze | `analyzer.py` | librosa BPM (from drums stem), key (from vocals+other+bass), transient punch, per-stem frequency peaks, stereo width, vocal presence |
-| 6 — Vectorize | `vectorizer.py` | CLAP 512-dim embedding via `laion/larger_clap_music_and_speech`; falls back to a librosa mel+MFCC composite if CLAP is unavailable |
+| 4 — Analyze | `analyzer.py` | HPSS in-memory separation; BPM from percussive signal, key from harmonic signal; transient punch, stereo width, dominant frequency peaks |
+| 5 — Vectorize | `vectorizer.py` | CLAP 512-dim embedding via `laion/larger_clap_music_and_speech`; falls back to librosa mel+MFCC composite if CLAP unavailable |
+
+**Analysis window:** All three audio stages (separator, analyzer, vectorizer) call `pipeline.window.pick_window()` to choose the same slice of the track:
+- Track ≥ 75s → **30s–90s** (skips intro, lands in verse 1 / pre-chorus)
+- Track 30s–75s → **0s–60s** (or 0 → end if shorter than 60s)
+- Track < 30s → **the entire track** (snippet mode)
+
+Tunable via constants in `pipeline/window.py`.
 | Assemble | `assembler.py` | Merges all outputs into the canonical JSON payload |
 
-All pipeline stages run via `anyio.to_thread.run_sync()` in `server.py` — they are synchronous functions wrapped for async execution.
+All pipeline stages run via `asyncio.to_thread()` in `server.py` — they are synchronous functions wrapped for async execution.
 
 ## Job Store
 
@@ -156,28 +140,45 @@ Jobs are tracked in an in-memory dict `JOB_STORE` in `server.py`. It is not pers
 
 ## MCP Tools Exposed
 
-- `split_audio(url, job_id?, model?)` — runs the full pipeline
+- `get_sonic_signature(url, job_id?)` — runs the full pipeline; returns sonic signature JSON
 - `get_job_status(job_id)` — fetches result from `JOB_STORE`
 - `list_jobs()` — lists all job statuses
 - `check_health()` — verifies FFmpeg, yt-dlp, and Python package availability
 
+## Sonic Signature Schema
+
+```json
+{
+  "header": { "job_id", "status", "confidence_score", "source_metadata" },
+  "sonic_signature": {
+    "bpm": float,
+    "key": "E Minor",
+    "mode_confidence": float,
+    "vibe_vector": [512 floats, L2-normalized],
+    "production_profile": {
+      "vocal_presence": "forward|present|background",
+      "transient_punch": float,
+      "stereo_width": "mono|narrow|wide|...",
+      "dominant_freq_peaks_hz": { "harmonic": [...], "percussive": [...] }
+    }
+  },
+  "telemetry": { "inference_time_sec": float }
+}
+```
+
 ## Environment Variables
 
 | Variable | Default | Description |
-|----------|---------|-------------|
-| `STEMS_ROOT` | `/tmp/audio_stems` | Root directory for all downloaded and separated audio files |
+|---|---|---|
+| `JOBS_ROOT` | `./jobs` | Root directory for job working files (downloaded audio, WAV) |
+| `KEEP_JOB_FILES` | unset | When `1`/`true`, skips post-run cleanup so audio + stems stay on disk (useful for debugging or fast-resume). |
 
 ## Gotchas
 
-**Fast Resume:** If `STEMS_ROOT/<job_id>/stems/` already contains all 4 stem WAVs, stages 2–4 (download, convert, split) are skipped automatically. Useful for re-analyzing without re-downloading; remove the stems directory to force a full re-run.
+**Auto-cleanup:** After a successful run, the downloaded audio (`raw_audio.*`), converted WAV (`input.wav`), and `stems/` directory are deleted automatically. Only `metadata.json` is retained. This frees ~75 MB per job. Set `KEEP_JOB_FILES=1` to disable.
 
-**Concurrency:** A global `asyncio.Lock` (`CONCURRENCY_LOCK`) serializes all Demucs/ML jobs — only one job runs at a time. Concurrent `split_audio` calls queue behind the lock.
+**Fast Resume:** If `JOBS_ROOT/<job_id>/input.wav` already exists, stages 2–3 (download, convert) are skipped automatically. Only effective when `KEEP_JOB_FILES=1` since auto-cleanup removes these files by default. Remove the job directory to force a full re-run.
 
-**CLAP install shorthand:** `pip install ".[clap]"` (uses the extras group in `pyproject.toml`) is equivalent to the manual `pip install transformers torch torchaudio`.
+**Concurrency:** A global `asyncio.Lock` (`CONCURRENCY_LOCK`) serializes all jobs — only one runs at a time.
 
-## Demucs Model Options
-
-- `htdemucs` (default) — 4 stems, fastest
-- `htdemucs_ft` — 4 stems, highest quality, slowest
-- `htdemucs_6s` — 6 stems (adds guitar, piano)
-- `mdx_extra` — 4 stems, alternative architecture
+**CLAP install shorthand:** `pip install ".[clap]"` (uses the extras group in `pyproject.toml`) installs torch, torchaudio, and transformers in one command.

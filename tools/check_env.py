@@ -26,7 +26,7 @@ def check_package(pkg_name):
 
 
 def main():
-    print("--- Environment Check for Audio Stem Splitter ---")
+    print("--- Environment Check for Audio Sonic Signature MCP ---")
     all_good = True
 
     # Check CLI tools
@@ -43,7 +43,6 @@ def main():
         "soundfile",
         "numpy",
         "scipy",
-        "demucs",
         "psutil",
     ]
     for pkg in packages_to_check:
@@ -52,7 +51,7 @@ def main():
 
     print("-------------------------------------------------")
     if all_good:
-        print("🎉 System looks ready to run the Audio Stem Splitter server.")
+        print("🎉 System looks ready to run the Audio Sonic Signature MCP server.")
         sys.exit(0)
     else:
         print(

@@ -1,7 +1,6 @@
 """
 Stage 3 — WAV Conversion
-Standardizes raw audio to 44.1kHz / 16-bit stereo WAV — the format
-htdemucs expects for best-quality separation.
+Standardizes raw audio to 44.1kHz / 16-bit stereo WAV for downstream analysis.
 """
 
 import logging

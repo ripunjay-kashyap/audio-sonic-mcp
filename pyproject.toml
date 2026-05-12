@@ -3,9 +3,9 @@ requires = ["setuptools>=72", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "audio-stem-mcp"
-version = "1.0.0"
-description = "MCP server that separates YouTube audio into stems and produces a sonic signature JSON"
+name = "audio-sonic-mcp"
+version = "2.0.0"
+description = "MCP server that returns a structured sonic signature (BPM, key, CLAP embedding) for any YouTube URL"
 requires-python = ">=3.10"
 dependencies = [
     "mcp==1.27.0",
@@ -14,7 +14,6 @@ dependencies = [
     "soundfile==0.13.1",
     "numpy==2.4.4",
     "scipy==1.17.1",
-    "demucs==4.0.1",
     "psutil==7.2.2",
 ]
 
