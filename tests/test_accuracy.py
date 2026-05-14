@@ -171,6 +171,8 @@ def test_production_profile_sanity(slug, url, true_bpm, true_key, bpm_xfail, key
     r = _get_or_run(slug)["result"]
     assert 0.0 <= r["mode_confidence"] <= 1.0
     assert isinstance(r["key_ambiguous"], bool)
+    assert isinstance(r["key_variable"], bool)
+    assert isinstance(r["key_map"], list)
     assert 0.0 <= r["transient_punch"] <= 1.0
     assert r["stereo_width_label"]    in {"mono", "narrow", "medium", "wide"}
     assert r["vocal_presence_label"]  in {"forward", "present", "background"}

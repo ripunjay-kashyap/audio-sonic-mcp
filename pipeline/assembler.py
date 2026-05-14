@@ -40,6 +40,8 @@ def assemble_payload(
             "key": features["key"],
             "mode_confidence": features.get("mode_confidence"),
             "key_ambiguous": features.get("key_ambiguous", False),
+            "key_variable": features.get("key_variable", False),
+            "key_map": features.get("key_map", []),
             "vibe_vector": vibe_vector,
             "production_profile": {
                 "vocal_presence": features["vocal_presence_label"],

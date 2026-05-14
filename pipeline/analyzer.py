@@ -109,6 +109,9 @@ def analyze_audio(wav_path: Path, stems_dir: "Path | None" = None) -> dict[str, 
             harmonics.append(y_harm_verse)
 
     key_str, mode_confidence, key_ambiguous = _detect_key(harmonics, TARGET_SR, y_bass=y_bass)
+    key_variable, key_map = (
+        detect_key_sections(wav_path, total_sec) if total_sec >= 90.0 else (False, [])
+    )
     transient_punch = _transient_punch(y_percussive, TARGET_SR)
     freq_peaks_hz = {
         "harmonic": _dominant_frequencies(y_harmonic, TARGET_SR),
@@ -136,6 +139,8 @@ def analyze_audio(wav_path: Path, stems_dir: "Path | None" = None) -> dict[str, 
         "key": key_str,
         "mode_confidence": mode_confidence,
         "key_ambiguous": key_ambiguous,
+        "key_variable": key_variable,
+        "key_map": key_map,
         "transient_punch": round(transient_punch, 3),
         "freq_peaks_hz": freq_peaks_hz,
         "stereo_width_label": stereo_width,
@@ -184,6 +189,97 @@ def _load_hpss_harmonic(
             "_load_hpss_harmonic: failed %s@%.0fs — %s", wav_path.name, offset_sec, exc
         )
         return None
+
+
+def detect_key_sections(
+    wav_path: "Path",
+    total_sec: float,
+    block_sec: float = 30.0,
+) -> "tuple[bool, list[dict]]":
+    """Detect whether a track modulates key across sections.
+
+    Divides the full track into ``block_sec``-length blocks, scores each
+    against all 24 Krumhansl keys, then checks whether one key dominates.
+    If no key covers ≥70% of audible blocks the track is flagged variable
+    and a ``key_map`` of merged same-key sections is returned.
+
+    Returns ``(key_variable, key_map)`` where ``key_map`` is a list of
+    ``{start_sec, end_sec, key}`` dicts (empty when not variable).
+    """
+    import librosa
+    from collections import Counter
+
+    _SR = 11025
+    _HOP = 512
+    MIN_BLOCKS = 3
+    DOMINANT_THRESHOLD = 0.70
+    ENERGY_FLOOR_RATIO = 0.15
+
+    if total_sec < block_sec * MIN_BLOCKS:
+        return False, []
+
+    try:
+        y, _ = librosa.load(str(wav_path), sr=_SR, mono=True)
+        chroma = librosa.feature.chroma_cens(y=y, sr=_SR, hop_length=_HOP)
+        rms = librosa.feature.rms(y=y, frame_length=1024, hop_length=_HOP)[0]
+
+        block_frames = int(block_sec * _SR / _HOP)
+        n_frames = chroma.shape[1]
+        n_blocks = n_frames // block_frames
+
+        if n_blocks < MIN_BLOCKS:
+            return False, []
+
+        energy_floor = float(rms.max()) * ENERGY_FLOOR_RATIO
+        block_results: list[tuple[float, float, str]] = []
+
+        for i in range(n_blocks):
+            s = i * block_frames
+            e = min(s + block_frames, n_frames)
+            if float(rms[s:e].mean()) < energy_floor:
+                continue
+
+            block_chroma = chroma[:, s:e].mean(axis=1).astype(float)
+            std = float(block_chroma.std())
+            if std > 0:
+                block_chroma = (block_chroma - block_chroma.mean()) / std
+
+            scores = _score_keys_for_chroma(block_chroma)
+            best_key = max(scores, key=scores.get)
+            start_s = i * block_sec
+            end_s = min((i + 1) * block_sec, total_sec)
+            block_results.append((start_s, end_s, best_key))
+
+        if len(block_results) < MIN_BLOCKS:
+            return False, []
+
+        key_counts = Counter(r[2] for r in block_results)
+        dominant_fraction = key_counts.most_common(1)[0][1] / len(block_results)
+
+        logger.info(
+            "detect_key_sections: %d audible blocks, dominant=%.0f%% (%s)",
+            len(block_results), dominant_fraction * 100, key_counts.most_common(1)[0][0],
+        )
+
+        if dominant_fraction >= DOMINANT_THRESHOLD:
+            return False, []
+
+        # Merge adjacent same-key blocks into contiguous sections
+        key_map: list[dict] = []
+        cur_start, cur_end, cur_key = block_results[0]
+        for start_s, end_s, key in block_results[1:]:
+            if key == cur_key:
+                cur_end = end_s
+            else:
+                key_map.append({"start_sec": round(cur_start, 1), "end_sec": round(cur_end, 1), "key": cur_key})
+                cur_start, cur_end, cur_key = start_s, end_s, key
+        key_map.append({"start_sec": round(cur_start, 1), "end_sec": round(cur_end, 1), "key": cur_key})
+
+        return True, key_map
+
+    except Exception as exc:
+        logger.warning("detect_key_sections: failed (%s)", exc)
+        return False, []
 
 
 # ── Stem helpers ─────────────────────────────────────────────────────────────

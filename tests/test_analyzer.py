@@ -30,6 +30,8 @@ class TestAnalyzeAudio:
             "key",
             "mode_confidence",
             "key_ambiguous",
+            "key_variable",
+            "key_map",
             "transient_punch",
             "freq_peaks_hz",
             "stereo_width_label",
