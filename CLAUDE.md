@@ -73,22 +73,30 @@ python smoke_test.py <url> <job_id>     # custom URL + job ID
 
 ### Accuracy regression tests (real song stems)
 
-`tests/test_accuracy.py` validates BPM (within 5%) and key (exact match) against ground-truth values from Songstats for a curated set of songs. Tests load cached Demucs stems from `jobs/<slug>/stems/mdx_extra/input/` — no network calls, ~1s per song. If stems aren't cached, the test is skipped.
+`tests/test_accuracy.py` calls `analyze_audio()` end-to-end against cached job artefacts and validates BPM (within 5%), key (exact match), analysis timing (< 10s), and production profile sanity. Each song's cache must contain both `input.wav` and `stems/`. If either is missing the test is skipped.
 
-To populate the cache for all songs, run each URL once with `KEEP_JOB_FILES=1` and the canonical slug as the job ID:
+Four test types run per song: `test_bpm_within_tolerance`, `test_key_matches_ground_truth`, `test_analysis_timing`, `test_production_profile_sanity`. All four share one `analyze_audio()` call per slug via an in-process cache.
 
-```bash
+Ground-truth BPM and key are sourced from Songstats. Flat keys are stored as sharps (Gb→F#, Ab→G#, Eb→D#) to match the pipeline's pitch class notation.
+
+To populate the cache for all songs, run each URL once with `KEEP_JOB_FILES=1`:
+
+```powershell
 $env:KEEP_JOB_FILES="1"  # Windows PowerShell; on bash: export KEEP_JOB_FILES=1
-.venv\Scripts\python.exe smoke_test.py "https://www.youtube.com/watch?v=fXivMSJm_kA"  sig_yukon
-.venv\Scripts\python.exe smoke_test.py "https://www.youtube.com/watch?v=tvTRZJ-4EyI"  sig_humble
-.venv\Scripts\python.exe smoke_test.py "https://www.youtube.com/watch?v=jLQrk6rmX6w"  sig_somebody
-.venv\Scripts\python.exe smoke_test.py "https://www.youtube.com/watch?v=iwd8N6K-sLk"  sig_exo_tempo
-.venv\Scripts\python.exe smoke_test.py "https://www.youtube.com/watch?v=0PTU4kGj5JI"  sig_lauv_julia
-.venv\Scripts\python.exe smoke_test.py "https://www.youtube.com/watch?v=kON9fn01rUQ"  sig_ballad
-.venv\Scripts\python.exe smoke_test.py "https://www.youtube.com/watch?v=r_0JjYUe5jo"  sig_hiphop
+.venv\Scripts\python.exe smoke_test.py "https://www.youtube.com/watch?v=Zf1d8SGuxfs"  sig_million_dollar
+.venv\Scripts\python.exe smoke_test.py "https://www.youtube.com/watch?v=H58vbez_m4E"  sig_not_like_us
+.venv\Scripts\python.exe smoke_test.py "https://www.youtube.com/watch?v=ru64eEvd6Ak"  sig_get_it_sexyy
+.venv\Scripts\python.exe smoke_test.py "https://www.youtube.com/watch?v=crWbG90dChw"  sig_shoulda_never
+.venv\Scripts\python.exe smoke_test.py "https://www.youtube.com/watch?v=nfs8NYg7yQM"  sig_attention
 ```
 
-Each run takes ~3-4 min (full Demucs separation). After populating, `pytest tests/test_accuracy.py -v` runs the full suite in seconds. The URL and ground-truth values are pinned in `GROUND_TRUTH` at the top of the test file — update both together when adding new songs.
+Each run takes ~3-4 min (full Demucs separation). After populating:
+
+```bash
+pytest tests/test_accuracy.py -v -s   # -s prints per-song BPM/key/timing lines
+```
+
+The URL and ground-truth values are pinned in `GROUND_TRUTH` at the top of the test file — update both together when adding new songs.
 
 ## Container (Podman)
 

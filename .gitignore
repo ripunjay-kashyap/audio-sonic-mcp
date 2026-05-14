@@ -51,3 +51,13 @@ htmlcov/
 *.ogg
 *.m4a
 *.aac
+*.webm
+
+# Job cache — downloaded audio + stems (large binary, regenerable via smoke_test.py)
+jobs/sig_*/
+
+# Dev / diagnostic scripts with machine-specific paths
+verify_batch.py
+
+# Scratch notes
+notes.txt

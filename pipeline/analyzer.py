@@ -35,16 +35,24 @@ def analyze_audio(wav_path: Path, stems_dir: "Path | None" = None) -> dict[str, 
 
     logger.info("analyze_audio: loading %s", wav_path)
 
-    from pipeline.window import pick_window
+    from pipeline.window import find_ssm_window, pick_window
 
     TARGET_SR = 22050
     ANALYSIS_DURATION = 60.0  # also used by _load_stem for the cropped stems
+
+    # For long tracks, find the most structurally repeated section via SSM
+    # (cheap 11 kHz scan, ~2 s). Short/medium tracks use the default 0 s offset.
+    with sf.SoundFile(str(wav_path)) as snd:
+        sr_orig = snd.samplerate
+        total_sec = snd.frames / sr_orig
+
+    chorus_start = find_ssm_window(wav_path, total_sec) if total_sec >= 75.0 else None
 
     # Read directly via soundfile to avoid librosa's audioread fallback,
     # which spawns FFmpeg with inherited stdin and deadlocks under MCP.
     with sf.SoundFile(str(wav_path)) as snd:
         sr_orig = snd.samplerate
-        offset_frames, frames_to_read = pick_window(snd.frames, sr_orig)
+        offset_frames, frames_to_read = pick_window(snd.frames, sr_orig, chorus_start)
         snd.seek(offset_frames)
         raw = snd.read(frames=frames_to_read, dtype="float32", always_2d=True)
     y_stereo = raw.T
@@ -55,13 +63,16 @@ def analyze_audio(wav_path: Path, stems_dir: "Path | None" = None) -> dict[str, 
     if sr_orig != TARGET_SR:
         y_mono = librosa.resample(y_mono, orig_sr=sr_orig, target_sr=TARGET_SR)
 
-    # Try stem-based analysis; fall back to HPSS on any missing stem
+    # Try stem-based analysis; fall back to HPSS on any missing stem.
+    # stem_offset aligns the stem read with the SSM chorus window so BPM,
+    # key, and vocal analysis all draw from the same section of the track.
+    stem_offset = chorus_start if chorus_start is not None else 0.0
     y_drums = y_bass = y_bass_other = y_vocals = None
     if stems_dir is not None:
-        y_drums = _load_stem(stems_dir, "drums", TARGET_SR, ANALYSIS_DURATION)
-        y_bass = _load_stem(stems_dir, "bass", TARGET_SR, ANALYSIS_DURATION)
-        y_other = _load_stem(stems_dir, "other", TARGET_SR, ANALYSIS_DURATION)
-        y_vocals = _load_stem(stems_dir, "vocals", TARGET_SR, ANALYSIS_DURATION)
+        y_drums = _load_stem(stems_dir, "drums", TARGET_SR, ANALYSIS_DURATION, stem_offset)
+        y_bass = _load_stem(stems_dir, "bass", TARGET_SR, ANALYSIS_DURATION, stem_offset)
+        y_other = _load_stem(stems_dir, "other", TARGET_SR, ANALYSIS_DURATION, stem_offset)
+        y_vocals = _load_stem(stems_dir, "vocals", TARGET_SR, ANALYSIS_DURATION, stem_offset)
         if y_bass is not None and y_other is not None:
             y_bass_other = y_bass + y_other
 
@@ -74,7 +85,30 @@ def analyze_audio(wav_path: Path, stems_dir: "Path | None" = None) -> dict[str, 
         y_harmonic, y_percussive = librosa.effects.hpss(y_mono)
 
     bpm = _extract_bpm(y_percussive, TARGET_SR, y_bass=y_bass)
-    key_str, mode_confidence = _detect_key(y_harmonic, TARGET_SR, y_bass=y_bass)
+    bpm_variable, bpm_range = _detect_bpm_variable(y_percussive, TARGET_SR, bpm)
+
+    # Build harmonic evidence list: section A (Demucs/HPSS from SSM window) +
+    # one or two extra HPSS passes for broader song context.
+    # When SSM is active: run ONE complementary HPSS pass in the verse region
+    # (just before the SSM chorus window) so that post-hoc checks like
+    # Check A can see whether major-scale characteristic tones are absent
+    # across the full song, not just the chorus.
+    # Without SSM: keep the original two fixed passes at 90s and 150s.
+    harmonics = [y_harmonic]
+    if chorus_start is None:
+        y_harm_b = _load_hpss_harmonic(wav_path, 90, 60, TARGET_SR)
+        y_harm_c = _load_hpss_harmonic(wav_path, 150, 60, TARGET_SR)
+        if y_harm_b is not None:
+            harmonics.append(y_harm_b)
+        if y_harm_c is not None:
+            harmonics.append(y_harm_c)
+    else:
+        verse_offset = max(30.0, chorus_start - 45.0)
+        y_harm_verse = _load_hpss_harmonic(wav_path, verse_offset, 60, TARGET_SR)
+        if y_harm_verse is not None:
+            harmonics.append(y_harm_verse)
+
+    key_str, mode_confidence, key_ambiguous = _detect_key(harmonics, TARGET_SR, y_bass=y_bass)
     transient_punch = _transient_punch(y_percussive, TARGET_SR)
     freq_peaks_hz = {
         "harmonic": _dominant_frequencies(y_harmonic, TARGET_SR),
@@ -88,16 +122,20 @@ def analyze_audio(wav_path: Path, stems_dir: "Path | None" = None) -> dict[str, 
         vocal_presence = _vocal_presence_estimate(y_harmonic, TARGET_SR)
 
     logger.info(
-        "analyze_audio: done bpm=%.1f key=%s confidence=%.2f",
+        "analyze_audio: done bpm=%.1f variable=%s key=%s confidence=%.2f",
         bpm,
+        bpm_variable,
         key_str,
         mode_confidence,
     )
 
     return {
         "bpm": round(bpm, 2),
+        "bpm_variable": bpm_variable,
+        "bpm_range": bpm_range,
         "key": key_str,
         "mode_confidence": mode_confidence,
+        "key_ambiguous": key_ambiguous,
         "transient_punch": round(transient_punch, 3),
         "freq_peaks_hz": freq_peaks_hz,
         "stereo_width_label": stereo_width,
@@ -105,13 +143,60 @@ def analyze_audio(wav_path: Path, stems_dir: "Path | None" = None) -> dict[str, 
     }
 
 
+# ── HPSS section loader ───────────────────────────────────────────────────────
+
+
+def _load_hpss_harmonic(
+    wav_path: "Path",
+    offset_sec: float,
+    duration_sec: float,
+    target_sr: int,
+) -> "np.ndarray | None":
+    """Load a raw WAV segment, apply HPSS, return the harmonic component.
+
+    Returns None when offset_sec is at or beyond the track's end.
+    """
+    import librosa
+    import soundfile as sf
+
+    try:
+        with sf.SoundFile(str(wav_path)) as snd:
+            sr_orig = snd.samplerate
+            total_sec = snd.frames / sr_orig
+            if offset_sec >= total_sec:
+                return None
+            offset_frames = int(offset_sec * sr_orig)
+            frames_to_read = min(
+                int(duration_sec * sr_orig),
+                snd.frames - offset_frames,
+            )
+            if frames_to_read <= 0:
+                return None
+            snd.seek(offset_frames)
+            raw = snd.read(frames=frames_to_read, dtype="float32", always_2d=True)
+        y = librosa.to_mono(raw.T)
+        if sr_orig != target_sr:
+            y = librosa.resample(y, orig_sr=sr_orig, target_sr=target_sr)
+        y_harmonic, _ = librosa.effects.hpss(y)
+        return y_harmonic
+    except Exception as exc:
+        logger.warning(
+            "_load_hpss_harmonic: failed %s@%.0fs — %s", wav_path.name, offset_sec, exc
+        )
+        return None
+
+
 # ── Stem helpers ─────────────────────────────────────────────────────────────
 
 
 def _load_stem(
-    stems_dir: Path, name: str, target_sr: int, duration: float
+    stems_dir: Path, name: str, target_sr: int, duration: float, offset_sec: float = 0.0
 ) -> "np.ndarray | None":
-    """Loads a single Demucs stem WAV as a mono float32 array at target_sr."""
+    """Loads a single Demucs stem WAV as a mono float32 array at target_sr.
+
+    offset_sec allows reading from the SSM-found chorus window rather than
+    always starting at the beginning of the stem file.
+    """
     import librosa
     import soundfile as sf
 
@@ -120,7 +205,11 @@ def _load_stem(
         return None
     try:
         with sf.SoundFile(str(stem_path)) as snd:
-            frames = min(int(duration * snd.samplerate), snd.frames)
+            offset_frames = int(offset_sec * snd.samplerate)
+            frames = min(int(duration * snd.samplerate), snd.frames - offset_frames)
+            if frames <= 0:
+                return None
+            snd.seek(offset_frames)
             raw = snd.read(frames=frames, dtype="float32", always_2d=True)
         y = librosa.to_mono(raw.T)
         if snd.samplerate != target_sr:
@@ -148,59 +237,60 @@ def _vocal_presence_from_stems(y_vocals: np.ndarray, y_mix: np.ndarray) -> str:
 # ── Sub-extractors ────────────────────────────────────────────────────────────
 
 
-def _kick_autocorr_score(y_drums: np.ndarray, sr: int, tempo_bpm: float) -> float:
-    """Returns autocorrelation strength at the period matching tempo_bpm.
+_BLOCK_SEC = 15.0    # duration of each analysis block (seconds)
+_BLOCK_COUNT = 4     # number of consecutive blocks to segment the drums stem
+_STABLE_STD = 2.0    # std dev below which tempo is considered rock-solid
+_VARIABLE_STD = 5.0  # std dev above which tempo is flagged as variable
 
-    Uses only the onset envelope of the drums signal so hi-hat energy
-    (which rides at 2× or 4× the kick period) doesn't contaminate the score.
-    Higher score → drums pulse more strongly at this tempo.
 
-    Args:
-        y_drums: mono drum stem at `sr` sample rate
-        sr:      sample rate
-        tempo_bpm: candidate tempo to score
+def _tempogram_prefers_high(y: np.ndarray, sr: int, lo: float, hi: float) -> bool:
+    """Return True when the tempogram shows enough energy at 'hi' to resolve a 2:1
+    ambiguity in favour of the faster candidate.
 
-    Returns:
-        Autocorrelation value in [-1, 1] at the lag matching tempo_bpm.
-        Returns 0.0 if the signal is too short or tempo is invalid.
+    Fast hip-hop with half-time feel (true ~140-145 BPM): hi-hats and ghost notes
+    create consistent onsets at the full tempo → tempogram peak at hi is ≥ 55% of
+    the peak at lo.
+
+    True slow songs (~70-80 BPM): no beat grid at 2×, so the hi peak is weak.
     """
     import librosa
 
-    HOP = 512  # onset envelope hop — gives ~43 frames/sec at 22050 Hz
+    if not (60.0 <= lo <= 90.0 and 120.0 <= hi <= 180.0):
+        return False
 
-    if tempo_bpm <= 0 or y_drums is None or y_drums.size < sr:
-        return 0.0
+    odf = librosa.onset.onset_strength(y=y, sr=sr, hop_length=512)
+    tgram = librosa.feature.tempogram(onset_envelope=odf, sr=sr, hop_length=512)
+    freqs = librosa.tempo_frequencies(tgram.shape[0], sr=sr, hop_length=512)
+    avg = tgram.mean(axis=1)
 
-    env = librosa.onset.onset_strength(y=y_drums, sr=sr, hop_length=HOP)
-    acf = librosa.autocorrelate(env, max_size=env.size)
-    lag = round((60.0 / tempo_bpm) * (sr / HOP))
-    if lag <= 0 or lag >= len(acf):
-        return 0.0
-    acf = acf / (acf[0] + 1e-10)
-    return float(acf[lag])
+    def _peak(target: float) -> float:
+        mask = np.abs(freqs - target) <= 3.0
+        return float(avg[mask].max()) if mask.any() else 0.0
+
+    e_lo = _peak(lo)
+    e_hi = _peak(hi)
+    ratio = e_hi / (e_lo + 1e-6)
+    logger.info(
+        "_tempogram_prefers_high: lo=%.1f(e=%.3f) hi=%.1f(e=%.3f) ratio=%.2f",
+        lo, e_lo, hi, e_hi, ratio,
+    )
+    return ratio >= 0.55
 
 
 def _extract_bpm(y: np.ndarray, sr: int, y_bass: "np.ndarray | None" = None) -> float:
+    """Primary BPM estimator: multi-seed beat tracking over the full analysis window
+    with bass-stem arbitration to resolve octave ambiguity."""
     import librosa
 
     def _track(sig, start):
         t, _ = librosa.beat.beat_track(y=sig, sr=sr, start_bpm=start)
         return float(t[0]) if hasattr(t, "__len__") else float(t)
 
-    # Three drum seeds expose octave ambiguity in the tracker.
-    # drums(160) is the key seed for fast hip-hop where lower seeds latch onto sub-pulses.
     t_d120 = _track(y, 120)
     t_d80 = _track(y, 80)
     t_d160 = _track(y, 160)
     t_b = _track(y_bass, 90) if y_bass is not None else None
 
-    # Case 1: drums(120) and drums(80) are in a clean 2:1 ratio.
-    # Use the bass tempo as the arbiter: whichever drum candidate is closer
-    # to the bass tempo is more likely the felt tempo. The bass typically
-    # follows the actual chord-changing pulse, so bass-near-drum_hi suggests
-    # the drums are tracking a half-time kick pattern (Levitating, DNA),
-    # while bass-near-drum_lo suggests a slow ballad with off-beat hits
-    # (Bruno Mars - When I Was Your Man). Falls back to lower if no bass.
     drum_lo, drum_hi = sorted([t_d120, t_d80])
     if drum_lo > 0 and 1.80 <= drum_hi / drum_lo <= 2.20:
         if t_b is not None and abs(t_b - drum_hi) < abs(t_b - drum_lo):
@@ -209,15 +299,21 @@ def _extract_bpm(y: np.ndarray, sr: int, y_bass: "np.ndarray | None" = None) -> 
                 drum_lo, drum_hi, t_b, drum_hi,
             )
             return float(drum_hi)
+        # Bass can't disambiguate (also at half-tempo or absent). Use the tempogram:
+        # fast hip-hop (true ~140-145 BPM) has hi-hat energy at the full tempo even
+        # when kick/snare follows a half-time feel; true slow songs (~70-80 BPM) don't.
+        if _tempogram_prefers_high(y, sr, drum_lo, drum_hi):
+            logger.info(
+                "_extract_bpm: drums 2:1 (%.1f, %.1f) tempogram → higher %.1f",
+                drum_lo, drum_hi, drum_hi,
+            )
+            return float(drum_hi)
         logger.info(
             "_extract_bpm: drums 2:1 (%.1f, %.1f) → lower %.1f",
             drum_lo, drum_hi, drum_lo,
         )
         return float(drum_lo)
 
-    # Case 2: drums(80) and bass(90) are in a 2:1 ratio — triplet feel.
-    # Drums lock to dotted-quarter (2/3 of true), bass to triplet-eighth (4/3 of true).
-    # Their arithmetic mean equals the true tempo exactly.
     if t_b is not None:
         bd_lo, bd_hi = sorted([t_d80, t_b])
         if bd_lo > 0 and 1.80 <= bd_hi / bd_lo <= 2.20:
@@ -225,12 +321,6 @@ def _extract_bpm(y: np.ndarray, sr: int, y_bass: "np.ndarray | None" = None) -> 
             logger.info("_extract_bpm: drums/bass 2:1 (%.1f, %.1f) → mean %.1f", bd_lo, bd_hi, tempo)
             return float(tempo)
 
-    # Case 3: drums(160) found a much faster pulse than drums(120) — fast hip-hop.
-    # When drums(120) latches onto a 2/3 sub-pulse (dotted-quarter), drums(160)
-    # resists the pull-down and finds the actual beat. Triggers only when the
-    # ratio is meaningful and drums(160) is in a plausible fast-tempo range.
-    # Upper bound is 180 (not 200) to avoid catching double-time errors like
-    # sig_yukon where d160 = 2× true tempo.
     if t_d160 > t_d120 * 1.25 and 130 <= t_d160 <= 180:
         logger.info(
             "_extract_bpm: drums(160)=%.1f >> drums(120)=%.1f → fast pulse %.1f",
@@ -238,10 +328,6 @@ def _extract_bpm(y: np.ndarray, sr: int, y_bass: "np.ndarray | None" = None) -> 
         )
         return float(t_d160)
 
-    # Case 3.5: drums(160) landed in the mid-tempo range (90-135) while all
-    # lower seeds were pulled to a half-time sub-pulse. The 160-seed resists
-    # the gravitational pull of sparse hip-hop kick patterns. Trust it when
-    # drums(120) is more than 15% below drums(160).
     if 90 <= t_d160 <= 135 and t_d120 < t_d160 * 0.85:
         logger.info(
             "_extract_bpm: case3.5 d160=%.1f in mid-range, d120=%.1f pulled low → %.1f",
@@ -249,10 +335,6 @@ def _extract_bpm(y: np.ndarray, sr: int, y_bass: "np.ndarray | None" = None) -> 
         )
         return float(t_d160)
 
-    # Case 3.7: triplet-feel correction. When all low-BPM seeds (d80, d120, bass)
-    # converge on the same value below 80, the drums are locked at a dotted-quarter
-    # sub-pulse (2/3 of true tempo). Multiplying by 1.5 gives the actual quarter-note
-    # pulse. Fires for songs like sig_yukon where d80=d120=bass=64.6 and true=96.
     seeds_converged = (
         abs(t_d120 - t_d80) < 2.0
         and (t_b is None or abs(t_d120 - t_b) < 2.0)
@@ -266,12 +348,10 @@ def _extract_bpm(y: np.ndarray, sr: int, y_bass: "np.ndarray | None" = None) -> 
             )
             return float(candidate)
 
-    # Case 4: drums(120) is in the typical pop/R&B range — trust it directly.
     if 90 <= t_d120 <= 165:
         logger.info("_extract_bpm: drums(120)=%.1f in pop range → trust", t_d120)
         return float(t_d120)
 
-    # Case 5: fall through to legacy filter + halving/doubling heuristics
     candidates = [t_d120, t_d80, t_d160] + ([t_b] if t_b is not None else [])
     in_range = [c for c in candidates if 60 <= c <= 130]
     if not in_range:
@@ -284,11 +364,6 @@ def _extract_bpm(y: np.ndarray, sr: int, y_bass: "np.ndarray | None" = None) -> 
             return float(half)
 
     if tempo < 100:
-        # Skip doubling for genuine slow songs: when bass is the *only* in-range
-        # candidate AND drums also report a high tempo (split kick/hi-hat
-        # pattern), the song is genuinely slow at the bass rate. Adele Hello:
-        # bass=83, drums oscillate 56/172, true=79. Without this guard, Case 5
-        # doubles 83 → 166. With it, we return 83 (closer to true).
         bass_only_in_range = t_b is not None and in_range == [t_b]
         has_high_drum = any(t > 140 for t in (t_d80, t_d120, t_d160))
         skip_double = bass_only_in_range and has_high_drum
@@ -301,6 +376,153 @@ def _extract_bpm(y: np.ndarray, sr: int, y_bass: "np.ndarray | None" = None) -> 
                 tempo *= 2
 
     return float(tempo)
+
+
+def _detect_bpm_variable(
+    y_drums: np.ndarray, sr: int, primary_bpm: float
+) -> "tuple[bool, list[float] | None]":
+    """
+    Segments the drums stem into _BLOCK_COUNT × _BLOCK_SEC blocks, estimates
+    tempo per block, snaps each estimate to the primary BPM's octave, then
+    uses std dev to classify as stable or variable.
+
+    Using primary_bpm as the snap anchor is reliable because the primary
+    estimate is already accurate — block estimates that land at 2× or ½× the
+    primary are octave errors that should be normalised before computing variance.
+
+    Returns:
+        bpm_variable — True when std dev across blocks exceeds _VARIABLE_STD
+        bpm_range    — [lo, hi] of snapped estimates when variable, else None
+    """
+    import librosa
+
+    block_samples = int(_BLOCK_SEC * sr)
+    estimates: list[int] = []
+    rms_values: list[float] = []
+
+    for i in range(_BLOCK_COUNT):
+        start = i * block_samples
+        block = y_drums[start : start + block_samples]
+        if len(block) < block_samples // 2:
+            continue
+        def _t(seed):
+            r, _ = librosa.beat.beat_track(y=block, sr=sr, start_bpm=seed)
+            return float(r[0]) if hasattr(r, "__len__") else float(r)
+        val = _best_block_bpm(_t(80), _t(120), _t(160))
+        estimates.append(round(val))
+        rms_values.append(float(np.sqrt(np.mean(block ** 2))) + 1e-10)
+
+    if len(estimates) < 2:
+        return False, None
+
+    # Drop low-energy blocks — breakdowns or near-silence produce noise
+    # estimates that inflate std dev and falsely flag stable songs as variable.
+    max_rms = max(rms_values)
+    ENERGY_FLOOR = 0.20  # block must be ≥ 20% of the loudest block's RMS
+    valid = [(e, r) for e, r in zip(estimates, rms_values)
+             if r >= max_rms * ENERGY_FLOOR]
+    if len(valid) < 2:
+        return False, None
+    estimates = [e for e, _ in valid]
+    rms_values = [r for _, r in valid]
+
+    snapped = _snap_to_primary(estimates, primary_bpm)
+    std = float(np.std(snapped))
+    lo, hi = float(min(snapped)), float(max(snapped))
+
+    logger.info(
+        "_detect_bpm_variable: blocks=%s snapped=%s std=%.1f (low-energy dropped: %d)",
+        estimates, snapped, std, _BLOCK_COUNT - len(estimates),
+    )
+
+    if std < _VARIABLE_STD:
+        return False, None
+
+    majority = _find_majority(snapped)
+    if majority is not None:
+        logger.info(
+            "_detect_bpm_variable: variable — majority=%.1f range=[%.1f, %.1f]",
+            majority, lo, hi,
+        )
+        return True, [lo, hi]
+
+    louder = float(_louder_pair_bpm(snapped, rms_values))
+    logger.info(
+        "_detect_bpm_variable: 50/50 — louder=%.1f range=[%.1f, %.1f]",
+        louder, lo, hi,
+    )
+    return True, [lo, hi]
+
+
+def _best_block_bpm(t80: float, t120: float, t160: float) -> float:
+    """Pick the most plausible BPM from three seed estimates for a single block.
+
+    Mirrors the old multi-seed heuristics at the per-block level:
+    - Fast track: seed_160 found a significantly faster pulse than seed_120
+      → trust it (catches fast hip-hop where seed_120 locks onto a sub-beat)
+    - 2:1 split between seed_80 and seed_120 → prefer the lower value
+      (the tracker latched onto a doubled pulse; the lower seed is correct)
+    - Otherwise trust seed_120 when it lands in a plausible BPM range
+    - Last resort: fall back to whichever seed gave the median value
+    """
+    if t160 > t120 * 1.25 and 110 <= t160 <= 185:
+        return t160
+    lo, hi = sorted([t80, t120])
+    if lo > 0 and 1.80 <= hi / lo <= 2.20:
+        return lo
+    if 80 <= t120 <= 170:
+        return t120
+    return sorted([t80, t120, t160])[1]  # median as last resort
+
+
+def _snap_to_primary(estimates: list[int], primary_bpm: float) -> list[int]:
+    """Snap block estimates to the primary BPM's octave for variance computation."""
+    result = []
+    for v in estimates:
+        if primary_bpm > 0 and abs(v / primary_bpm - 2.0) < 0.20:
+            result.append(round(v / 2))
+        elif primary_bpm > 0 and abs(v * 2 / primary_bpm - 1.0) < 0.20:
+            result.append(round(v * 2))
+        else:
+            result.append(v)
+    return result
+
+
+def _octave_snap(estimates: list[int]) -> list[int]:
+    """Snap values that are ~2× or ~½× the median to the majority octave."""
+    if len(estimates) < 2:
+        return list(estimates)
+    mid = sorted(estimates)[len(estimates) // 2]
+    result = []
+    for v in estimates:
+        if mid > 0 and abs(v / mid - 2.0) < 0.15:
+            result.append(round(v / 2))
+        elif mid > 0 and abs((v * 2) / mid - 1.0) < 0.15:
+            result.append(round(v * 2))
+        else:
+            result.append(v)
+    return result
+
+
+def _find_majority(estimates: list[int]) -> "int | None":
+    """Return mean of the majority cluster when 3+ values are within ±2 BPM."""
+    for val in estimates:
+        cluster = [v for v in estimates if abs(v - val) <= 2]
+        if len(cluster) >= 3:
+            return round(sum(cluster) / len(cluster))
+    return None
+
+
+def _louder_pair_bpm(estimates: list[int], rms_values: list[float]) -> int:
+    """For a 50/50 tempo split, return the BPM of the louder pair of blocks."""
+    unique = sorted(set(estimates))
+    if len(unique) != 2:
+        return round(sum(estimates) / len(estimates))
+    rms_by_bpm: dict[int, float] = {u: 0.0 for u in unique}
+    for bpm_val, rms in zip(estimates, rms_values):
+        closest = min(unique, key=lambda u: abs(u - bpm_val))
+        rms_by_bpm[closest] += rms
+    return max(rms_by_bpm, key=lambda u: rms_by_bpm[u])
 
 
 PITCH_CLASSES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
@@ -334,17 +556,16 @@ def _normalized_chroma_mean(y: np.ndarray, sr: int) -> np.ndarray:
 
 
 def _detect_key(
-    y_harmonic: np.ndarray,
+    harmonics: "np.ndarray | list[np.ndarray | None]",
     sr: int,
     y_bass: "np.ndarray | None" = None,
 ) -> tuple[str, float]:
-    """Detects musical key from a harmonic signal via CQT chroma correlation.
+    """Detects musical key by correlating CQT chroma against Krumhansl templates.
 
-    Uses multi-window consensus: splits y_harmonic into 3 overlapping 30s windows,
-    scores all 24 keys per window, then sums per-key scores across windows. This
-    smooths out single-window anomalies — e.g. when a verse is in a different mode
-    than the chorus, or when one window catches a chromatic passage. For signals
-    shorter than 45s, falls back to single-window analysis.
+    Accepts either a single harmonic signal or a list of signals (e.g. Demucs
+    section A + HPSS sections B and C). For each signal, applies 3-window scoring
+    and sums all per-key correlation scores before picking the winner. This lets
+    later song sections contribute evidence when the intro/verse hides the true key.
 
     When y_bass is provided, applies a bass-root bias: if the strongest pitch
     class in the bass stem conflicts with the chroma winner's root AND the bass
@@ -353,29 +574,44 @@ def _detect_key(
     """
     import librosa
 
-    if y_harmonic is None or y_harmonic.size <= 1:
-        return "Unknown", 0.0
+    # Normalise to a flat list, discarding None and empty arrays
+    if isinstance(harmonics, np.ndarray):
+        signals: list[np.ndarray] = [harmonics] if harmonics.size > 1 else []
+    else:
+        signals = [h for h in harmonics if h is not None and h.size > 1]
 
-    # Multi-window scoring: split into 3 overlapping windows of equal size.
-    # For a 60s signal at sr=22050, each window is 30s with 15s overlap.
+    if not signals:
+        return "Unknown", 0.0, False
+
     WINDOW_SEC = 30.0
     win_samples = int(WINDOW_SEC * sr)
-    n = y_harmonic.size
 
-    if n >= int(45 * sr):
-        starts = [0, (n - win_samples) // 2, n - win_samples]
-        per_window_scores = [
-            _score_keys_for_chroma(_normalized_chroma_mean(y_harmonic[s:s + win_samples], sr))
-            for s in starts
-        ]
-        all_scores = {
-            k: sum(ws[k] for ws in per_window_scores) / len(per_window_scores)
-            for k in per_window_scores[0]
-        }
-    else:
-        all_scores = _score_keys_for_chroma(_normalized_chroma_mean(y_harmonic, sr))
+    # Accumulate per-key correlation scores across all signals and their windows.
+    # Also collect chroma vectors for the characteristic-tone mode tiebreaker below.
+    all_scores: dict[str, float] = {}
+    all_chroma_vecs: list[np.ndarray] = []
+    for y_harmonic in signals:
+        n = y_harmonic.size
+        if n >= int(45 * sr):
+            starts = [0, (n - win_samples) // 2, n - win_samples]
+            window_chromas = [
+                _normalized_chroma_mean(y_harmonic[s:s + win_samples], sr) for s in starts
+            ]
+            per_window_scores = [_score_keys_for_chroma(c) for c in window_chromas]
+            signal_scores = {
+                k: sum(ws[k] for ws in per_window_scores) / len(per_window_scores)
+                for k in per_window_scores[0]
+            }
+            all_chroma_vecs.extend(window_chromas)
+        else:
+            chroma_vec = _normalized_chroma_mean(y_harmonic, sr)
+            signal_scores = _score_keys_for_chroma(chroma_vec)
+            all_chroma_vecs.append(chroma_vec)
+        for k, v in signal_scores.items():
+            all_scores[k] = all_scores.get(k, 0.0) + v
 
     best_key, best_score = max(all_scores.items(), key=lambda kv: kv[1])
+    correction_fired = False  # tracks whether any post-hoc rule changed best_key
 
     # Bass-root bias: bass lines follow the tonic, resolving relative-key ties.
     # Only applies when the bass is anchored on a single pitch (concentration > 1.15).
@@ -403,6 +639,7 @@ def _detect_key(
                         best_key, candidate, c_score, best_score, bass_concentration,
                     )
                     best_key, best_score = candidate, c_score
+                    correction_fired = True
                     break
         elif bass_root != winner_root:
             logger.info(
@@ -410,8 +647,103 @@ def _detect_key(
                 bass_concentration, BASS_CONCENTRATION_MIN, bass_root, winner_root,
             )
 
+    # Characteristic-tone mode tiebreaker: when Krumhansl confidence is low
+    # (< 0.40), compare scale-degree energy sums for minor (b3/b6/b7) vs major
+    # (3/6/7) to resolve parallel-key ambiguity caused by modal sections in the
+    # analyzed window (e.g., a verse that leans the opposite mode from the song's
+    # overall key).
+    if best_score < 0.40 and all_chroma_vecs:
+        avg_chroma = np.mean(all_chroma_vecs, axis=0)
+        winner_root_str, winner_mode = best_key.split()
+        root_idx = PITCH_CLASSES.index(winner_root_str)
+        minor_tones = float(
+            avg_chroma[(root_idx + 3) % 12]    # b3
+            + avg_chroma[(root_idx + 8) % 12]  # b6
+            + avg_chroma[(root_idx + 10) % 12] # b7
+        )
+        major_tones = float(
+            avg_chroma[(root_idx + 4) % 12]    # 3
+            + avg_chroma[(root_idx + 9) % 12]  # 6
+            + avg_chroma[(root_idx + 11) % 12] # 7
+        )
+        char_mode = "Minor" if minor_tones > major_tones else "Major"
+        if char_mode != winner_mode:
+            candidate = f"{winner_root_str} {char_mode}"
+            logger.info(
+                "_detect_key: char-tone mode flip %s → %s (min_tones=%.3f, maj_tones=%.3f, conf=%.2f)",
+                best_key, candidate, minor_tones, major_tones, best_score,
+            )
+            best_key, best_score = candidate, all_scores.get(candidate, best_score)
+            correction_fired = True
+
+    # ── Post-hoc key correction ───────────────────────────────────────────────
+    # Two targeted checks that catch failure modes the Krumhansl correlator
+    # can't resolve on its own.  Both require the mean chroma vector.
+    if all_chroma_vecs:
+        avg_cv = np.mean(all_chroma_vecs, axis=0)
+        pk_root_str, pk_mode = best_key.split()
+        pk_root_idx = PITCH_CLASSES.index(pk_root_str)
+
+        if pk_mode == "Major":
+            # Check A — absent characteristic-tone override
+            # If EITHER the major 3rd (4 semitones) OR the major 7th / leading
+            # tone (11 semitones) of the detected key has strongly negative
+            # z-scored chroma energy, the detected root is almost certainly
+            # acting as the subdominant (IV) of the true minor key.
+            # Both checks use the same -0.5 threshold; firing on either is
+            # enough because a genuine major key requires both tones to be present.
+            major_third_energy = float(avg_cv[(pk_root_idx + 4) % 12])
+            major_seventh_energy = float(avg_cv[(pk_root_idx + 11) % 12])
+            if major_third_energy < -0.5 or major_seventh_energy < -0.5:
+                candidate_root = (pk_root_idx + 7) % 12
+                candidate = f"{PITCH_CLASSES[candidate_root]} Minor"
+                c_score = all_scores.get(candidate, -np.inf)
+                if c_score > 0.5:
+                    logger.info(
+                        "_detect_key: absent-char-tone %s (3rd=%.2f 7th=%.2f) → %s (%.3f)",
+                        best_key, major_third_energy, major_seventh_energy, candidate, c_score,
+                    )
+                    best_key, best_score = candidate, c_score
+                    correction_fired = True
+
+        elif pk_mode == "Minor":
+            # Check B — 5th-alias distinguishing-tone check
+            # When the bass pedals on the 5th degree, the chroma may treat the
+            # 5th as the root, producing an alias minor key a P5 above the true
+            # key.  Resolve by comparing the one note that distinguishes the two
+            # keys: the alias key contains (root+1) semitone; the detected key
+            # contains (root+2) semitone.  If the alias's distinctive note has
+            # more energy, prefer the alias (the true key).
+            alias_root = (pk_root_idx + 5) % 12
+            alias_key = f"{PITCH_CLASSES[alias_root]} Minor"
+            alias_score = all_scores.get(alias_key, -np.inf)
+            if alias_score > best_score * 0.30:
+                alias_dist = float(avg_cv[(pk_root_idx + 1) % 12])
+                detected_dist = float(avg_cv[(pk_root_idx + 2) % 12])
+                if alias_dist > detected_dist:
+                    logger.info(
+                        "_detect_key: 5th-alias %s → %s "
+                        "(alias_dist=%.2f > det_dist=%.2f, score=%.3f)",
+                        best_key, alias_key, alias_dist, detected_dist, alias_score,
+                    )
+                    best_key, best_score = alias_key, alias_score
+                    correction_fired = True
+
     confidence = round(float(np.clip(best_score, 0.0, 1.0)), 2)
-    return best_key, confidence
+
+    # Ambiguity flag: when no domain-specific correction fired, check whether
+    # the raw Krumhansl scores are too close to call.  A gap < 0.08 between
+    # rank-1 and rank-2 means the chromagram fits two keys almost equally well.
+    # When a correction did fire we trust the musical evidence and stay quiet.
+    AMBIGUITY_THRESHOLD = 0.08
+    if not correction_fired and len(all_scores) >= 2:
+        sorted_scores = sorted(all_scores.values(), reverse=True)
+        gap = sorted_scores[0] - sorted_scores[1]
+        key_ambiguous = gap < AMBIGUITY_THRESHOLD
+    else:
+        key_ambiguous = False
+
+    return best_key, confidence, key_ambiguous
 
 
 def _transient_punch(y: np.ndarray, sr: int) -> float:

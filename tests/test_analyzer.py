@@ -8,6 +8,7 @@ from pipeline.analyzer import (
     _detect_key,
     _dominant_frequencies,
     _extract_bpm,
+    _load_hpss_harmonic,
     _stereo_width_label,
     _transient_punch,
     _vocal_presence_estimate,
@@ -24,8 +25,11 @@ class TestAnalyzeAudio:
         result = analyze_audio(audio_wav)
         assert set(result.keys()) == {
             "bpm",
+            "bpm_variable",
+            "bpm_range",
             "key",
             "mode_confidence",
+            "key_ambiguous",
             "transient_punch",
             "freq_peaks_hz",
             "stereo_width_label",
@@ -100,24 +104,24 @@ class TestDetectKey:
     def test_returns_major_or_minor_string(self):
         t = np.linspace(0, 4, SR * 4, endpoint=False)
         y = np.sin(2 * np.pi * 261.63 * t).astype(np.float32)  # C4
-        key, confidence = _detect_key(y, SR)
+        key, confidence, _ = _detect_key(y, SR)
         assert "Major" in key or "Minor" in key
 
     def test_contains_known_pitch_class(self):
         classes = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
         t = np.linspace(0, 4, SR * 4, endpoint=False)
         y = np.sin(2 * np.pi * 440 * t).astype(np.float32)
-        key, confidence = _detect_key(y, SR)
+        key, confidence, _ = _detect_key(y, SR)
         assert any(key.startswith(p) for p in classes)
 
     def test_confidence_in_0_1_range(self):
         t = np.linspace(0, 4, SR * 4, endpoint=False)
         y = np.sin(2 * np.pi * 440 * t).astype(np.float32)
-        _, confidence = _detect_key(y, SR)
+        _, confidence, _ = _detect_key(y, SR)
         assert 0.0 <= confidence <= 1.0
 
     def test_empty_signal_returns_unknown(self):
-        _, confidence = _detect_key(np.array([]), SR)
+        _, confidence, _ = _detect_key(np.array([]), SR)
         assert confidence == 0.0
 
 
@@ -183,6 +187,53 @@ class TestStereoWidthLabel:
         left = rng.standard_normal(SR).astype(np.float32)
         right = rng.standard_normal(SR).astype(np.float32)
         assert _stereo_width_label(np.stack([left, right]), SR) in ("medium", "wide")
+
+
+# ── _load_hpss_harmonic ───────────────────────────────────────────────────────
+
+
+class TestLoadHpssHarmonic:
+    def test_returns_none_when_offset_beyond_duration(self, audio_wav):
+        result = _load_hpss_harmonic(audio_wav, offset_sec=9999, duration_sec=60, target_sr=22050)
+        assert result is None
+
+    def test_returns_ndarray_for_valid_offset(self, audio_wav):
+        result = _load_hpss_harmonic(audio_wav, offset_sec=0, duration_sec=2, target_sr=22050)
+        assert isinstance(result, np.ndarray)
+        assert result.size > 0
+
+    def test_resamples_to_target_sr(self, audio_wav):
+        # audio_wav is 44100 Hz; requesting target_sr=22050
+        result = _load_hpss_harmonic(audio_wav, offset_sec=0, duration_sec=2, target_sr=22050)
+        assert result is not None
+        assert abs(len(result) - 2 * 22050) < 1000
+
+
+# ── _detect_key list input ────────────────────────────────────────────────────
+
+
+class TestDetectKeyListInput:
+    def test_accepts_single_element_list(self):
+        t = np.linspace(0, 4, 22050 * 4, endpoint=False)
+        y = np.sin(2 * np.pi * 261.63 * t).astype(np.float32)
+        key, confidence, ambiguous = _detect_key([y], 22050)
+        assert "Major" in key or "Minor" in key
+        assert isinstance(ambiguous, bool)
+
+    def test_accepts_multi_element_list(self):
+        t = np.linspace(0, 4, 22050 * 4, endpoint=False)
+        y_a = np.sin(2 * np.pi * 261.63 * t).astype(np.float32)  # C4
+        y_b = np.sin(2 * np.pi * 293.66 * t).astype(np.float32)  # D4
+        key, confidence, ambiguous = _detect_key([y_a, y_b], 22050)
+        assert "Major" in key or "Minor" in key
+        assert 0.0 <= confidence <= 1.0
+        assert isinstance(ambiguous, bool)
+
+    def test_filters_none_values_from_list(self):
+        t = np.linspace(0, 4, 22050 * 4, endpoint=False)
+        y = np.sin(2 * np.pi * 261.63 * t).astype(np.float32)
+        key, confidence, _ = _detect_key([y, None], 22050)
+        assert "Major" in key or "Minor" in key
 
 
 # ── _vocal_presence_estimate ──────────────────────────────────────────────────

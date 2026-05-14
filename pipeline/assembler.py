@@ -35,8 +35,11 @@ def assemble_payload(
         },
         "sonic_signature": {
             "bpm": features["bpm"],
+            "bpm_variable": features.get("bpm_variable", False),
+            "bpm_range": features.get("bpm_range"),
             "key": features["key"],
             "mode_confidence": features.get("mode_confidence"),
+            "key_ambiguous": features.get("key_ambiguous", False),
             "vibe_vector": vibe_vector,
             "production_profile": {
                 "vocal_presence": features["vocal_presence_label"],
