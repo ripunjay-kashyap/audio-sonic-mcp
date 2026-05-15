@@ -14,7 +14,7 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
-from pipeline.ingestion import validate_source, save_metadata, load_metadata
+from pipeline.ingestion import validate_url_format, validate_source, save_metadata, load_metadata
 from pipeline.downloader import download_audio
 from pipeline.converter import convert_to_wav
 from pipeline.separator import separate_stems
@@ -83,6 +83,15 @@ def _cleanup_job_artifacts(job_dir: Path) -> None:
     logger.info(
         "cleanup: freed %.1f MB from %s", removed_bytes / 1_048_576, job_dir.name
     )
+
+
+def _maybe_warn_non_music(payload: dict) -> None:
+    """Inject a non_music_warning when confidence_score is below the music threshold."""
+    if payload.get("header", {}).get("confidence_score", 1.0) < 0.35:
+        payload["non_music_warning"] = (
+            "Low confidence score — this audio may not be music. "
+            "BPM, key, and vibe vector results may be unreliable."
+        )
 
 
 # ── Tool handlers ─────────────────────────────────────────────────────────────
