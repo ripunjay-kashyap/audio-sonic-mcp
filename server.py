@@ -94,6 +94,104 @@ def _maybe_warn_non_music(payload: dict) -> None:
         )
 
 
+# ── Background pipeline ───────────────────────────────────────────────────────
+
+
+async def _run_pipeline(job_id: str, url: str, job_dir: Path) -> None:
+    """Background coroutine: acquires CONCURRENCY_LOCK, runs all pipeline stages,
+    writes final result (success or error) to JOB_STORE."""
+    t_start = time.perf_counter()
+    try:
+        async with CONCURRENCY_LOCK:
+            import anyio
+
+            # Stage 1: Validate + Metadata Cache
+            logger.info("[1/5] Validating source …")
+            cached_meta = load_metadata(job_dir)
+            if cached_meta:
+                logger.info("Fast-Resume: Loaded metadata from disk for job=%s", job_id)
+                source_info = cached_meta
+            else:
+                source_info = await anyio.to_thread.run_sync(validate_source, url)
+                try:
+                    save_metadata(job_dir, source_info)
+                    logger.info("Persisted metadata.json for job=%s", job_id)
+                except Exception as e:
+                    logger.warning("Could not persist metadata for job=%s: %s", job_id, e)
+
+            # Fast Resume Check
+            wav_path = job_dir / "input.wav"
+            if wav_path.exists():
+                logger.info(
+                    "Fast-Resume: Found existing WAV at %s. Skipping download & convert.",
+                    wav_path,
+                )
+            else:
+                # Stage 2: Download
+                logger.info("[2/5] Downloading audio stream …")
+                raw_audio_path = await anyio.to_thread.run_sync(
+                    download_audio, url, job_id, JOBS_ROOT
+                )
+
+                # Stage 3: Convert
+                logger.info("[3/5] Converting to 44.1kHz WAV …")
+                wav_path = await anyio.to_thread.run_sync(convert_to_wav, raw_audio_path)
+
+            # Stage 4: Stem Separation
+            # asyncio.to_thread avoids anyio cancellation machinery on long-running stages
+            logger.info("[4/5] Separating stems (Demucs mdx_extra) …")
+            stems_dir = await asyncio.to_thread(separate_stems, wav_path)
+            if stems_dir:
+                logger.info("[4/5] Stems ready at %s", stems_dir)
+            else:
+                logger.info("[4/5] Stem separation unavailable — will use HPSS")
+
+            # Stage 5: Analyze + Vectorize
+            logger.info("[5/5] Running analysis and vibe vectorization …")
+            features = await asyncio.to_thread(analyze_audio, wav_path, stems_dir)
+            logger.info(
+                "[5/5] Analysis complete: bpm=%.1f key=%s confidence=%.2f",
+                features["bpm"],
+                features["key"],
+                features.get("mode_confidence", 0),
+            )
+
+            vibe_vector = await asyncio.to_thread(generate_vibe_vector, wav_path)
+            logger.info("[5/5] Vectorize complete: dim=%d", len(vibe_vector))
+
+            elapsed = time.perf_counter() - t_start
+            payload = assemble_payload(
+                job_id=job_id,
+                features=features,
+                vibe_vector=vibe_vector,
+                inference_time=elapsed,
+                cpu_samples=[],
+                source_info=source_info,
+            )
+            _maybe_warn_non_music(payload)
+
+            JOB_STORE[job_id] = {"status": "success", "payload": payload}
+            logger.info("✓ _run_pipeline | job=%s elapsed=%.1fs", job_id, elapsed)
+            _cleanup_job_artifacts(job_dir)
+
+    except BaseException as exc:
+        elapsed = time.perf_counter() - t_start
+        error_payload = {
+            "header": {"job_id": job_id, "status": "error", "confidence_score": 0.0},
+            "error": {"type": type(exc).__name__, "message": str(exc)},
+            "telemetry": {"inference_time_sec": round(elapsed, 2)},
+        }
+        JOB_STORE[job_id] = {"status": "error", "payload": error_payload}
+        logger.error(
+            "✗ _run_pipeline | job=%s elapsed=%.1fs error=%s: %s",
+            job_id,
+            elapsed,
+            type(exc).__name__,
+            exc,
+            exc_info=True,
+        )
+
+
 # ── Tool handlers ─────────────────────────────────────────────────────────────
 
 
