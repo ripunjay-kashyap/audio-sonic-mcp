@@ -61,3 +61,9 @@ verify_batch.py
 
 # Scratch notes
 notes.txt
+
+# Benchmark and test outputs
+benchmark_kaggle.py
+benchmark_results.json
+kaggle_output/
+$null
