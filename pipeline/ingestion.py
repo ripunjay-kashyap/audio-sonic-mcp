@@ -21,6 +21,25 @@ SUPPORTED_HOSTS = {
 }
 
 
+def validate_url_format(url: str) -> None:
+    """
+    Synchronous URL format and domain check — no network calls.
+    Raises ValueError for invalid or unsupported URLs.
+    Called upfront by get_sonic_signature before spawning the pipeline task.
+    """
+    parsed = urlparse(url)
+
+    if not parsed.scheme or not parsed.netloc:
+        raise ValueError(f"Invalid URL format: {url!r}")
+
+    host = parsed.netloc.lstrip("www.")
+    if host not in SUPPORTED_HOSTS and not _is_direct_audio(url):
+        raise ValueError(
+            f"Unsupported source: '{parsed.netloc}'. "
+            f"Supported: {', '.join(sorted(SUPPORTED_HOSTS))}"
+        )
+
+
 def validate_source(url: str) -> dict:
     """
     Validates the URL and probes metadata via yt-dlp.

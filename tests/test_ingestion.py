@@ -136,3 +136,40 @@ class TestValidateSource:
         ):
             result = validate_source("https://www.youtube.com/watch?v=nodur")
         assert result["duration_sec"] == 0
+
+
+# ── validate_url_format ───────────────────────────────────────────────────────
+
+
+from pipeline.ingestion import validate_url_format
+
+
+def test_validate_url_format_accepts_youtube():
+    # Should not raise
+    validate_url_format("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+
+
+def test_validate_url_format_accepts_youtu_be():
+    validate_url_format("https://youtu.be/dQw4w9WgXcQ")
+
+
+def test_validate_url_format_accepts_direct_audio():
+    validate_url_format("https://example.com/track.mp3")
+
+
+def test_validate_url_format_rejects_no_scheme():
+    import pytest
+    with pytest.raises(ValueError, match="Invalid URL format"):
+        validate_url_format("www.youtube.com/watch?v=abc")
+
+
+def test_validate_url_format_rejects_unsupported_domain():
+    import pytest
+    with pytest.raises(ValueError, match="Unsupported source"):
+        validate_url_format("https://vimeo.com/123456")
+
+
+def test_validate_url_format_rejects_random_string():
+    import pytest
+    with pytest.raises(ValueError):
+        validate_url_format("not a url at all")
