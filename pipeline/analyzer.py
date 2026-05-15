@@ -85,7 +85,11 @@ def analyze_audio(wav_path: Path, stems_dir: "Path | None" = None) -> dict[str, 
         y_harmonic, y_percussive = librosa.effects.hpss(y_mono)
 
     bpm = _extract_bpm(y_percussive, TARGET_SR, y_bass=y_bass)
-    bpm_variable, bpm_range = _detect_bpm_variable(y_percussive, TARGET_SR, bpm)
+
+    # Full-track majority vote: 5 proportional windows at 11 kHz.
+    # Overrides primary only when a clear majority (>50%) exists and gap is 7–25%.
+    window_scan = _scan_bpm_5windows(wav_path, total_sec) if total_sec >= 60.0 else []
+    bpm, bpm_variable, bpm_range = _majority_bpm_from_windows(window_scan, bpm)
 
     # Build harmonic evidence list: section A (Demucs/HPSS from SSM window) +
     # one or two extra HPSS passes for broader song context.
@@ -338,6 +342,53 @@ _BLOCK_COUNT = 4     # number of consecutive blocks to segment the drums stem
 _STABLE_STD = 2.0    # std dev below which tempo is considered rock-solid
 _VARIABLE_STD = 5.0  # std dev above which tempo is flagged as variable
 
+_SCAN_SR = 11025          # reduced SR for fast full-track BPM scan
+_SWITCH_MIN_FRACTION = 0.30  # minority cluster needs ≥30% of windows to flag variable
+
+# Lazy-loaded madmom processors (model weights loaded once, reused across calls)
+_MADMOM_BEAT_PROC: "object | None" = None
+_MADMOM_DBN_PROC: "object | None" = None
+
+
+def _get_madmom_procs() -> "tuple":
+    """Lazy-load and cache madmom beat processors. Raises ImportError if not installed."""
+    global _MADMOM_BEAT_PROC, _MADMOM_DBN_PROC
+    if _MADMOM_BEAT_PROC is None:
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            from madmom.features.beats import RNNBeatProcessor, DBNBeatTrackingProcessor
+            _MADMOM_BEAT_PROC = RNNBeatProcessor()
+            _MADMOM_DBN_PROC = DBNBeatTrackingProcessor(fps=100)
+    return _MADMOM_BEAT_PROC, _MADMOM_DBN_PROC
+
+
+def _extract_bpm_madmom(y: np.ndarray, sr: int) -> float:
+    """Estimate BPM using madmom RNN beat activations + DBN tracker.
+
+    Accepts the full-mix signal (not HPSS-separated) — madmom's RNN uses the
+    full spectral context including bass and harmonic content for timing.
+    Raises RuntimeError on failure; caller should catch and fall back.
+    """
+    import librosa
+
+    y_44k = librosa.resample(y, orig_sr=sr, target_sr=44100) if sr != 44100 else y.copy()
+    y_44k = y_44k.astype(np.float32)
+
+    proc, dbn = _get_madmom_procs()
+    acts = proc(y_44k)
+    beats = dbn(acts)
+
+    if len(beats) < 4:
+        raise RuntimeError(f"madmom: only {len(beats)} beats detected")
+
+    bpm = float(60.0 / np.median(np.diff(beats)))
+    if not (40.0 <= bpm <= 300.0):
+        raise RuntimeError(f"madmom: BPM {bpm:.1f} out of range")
+
+    logger.info("_extract_bpm_madmom: %.1f BPM from %d beats", bpm, len(beats))
+    return bpm
+
 
 def _tempogram_prefers_high(y: np.ndarray, sr: int, lo: float, hi: float) -> bool:
     """Return True when the tempogram shows enough energy at 'hi' to resolve a 2:1
@@ -373,7 +424,7 @@ def _tempogram_prefers_high(y: np.ndarray, sr: int, lo: float, hi: float) -> boo
     return ratio >= 0.55
 
 
-def _extract_bpm(y: np.ndarray, sr: int, y_bass: "np.ndarray | None" = None) -> float:
+def _extract_bpm_primary(y: np.ndarray, sr: int, y_bass: "np.ndarray | None" = None) -> float:
     """Primary BPM estimator: multi-seed beat tracking over the full analysis window
     with bass-stem arbitration to resolve octave ambiguity."""
     import librosa
@@ -472,6 +523,53 @@ def _extract_bpm(y: np.ndarray, sr: int, y_bass: "np.ndarray | None" = None) -> 
                 tempo *= 2
 
     return float(tempo)
+
+
+def _extract_bpm(y: np.ndarray, sr: int, y_bass: "np.ndarray | None" = None) -> float:
+    """Calls _extract_bpm_primary, then cross-checks with tempogram peak + PLP.
+
+    For music without strong percussive transients (jazz, acoustic), beat_track
+    can lock onto a subdivision rather than the fundamental quarter-note pulse.
+    Tempogram and PLP estimate periodicity independently — if both agree on a
+    value 7–25% away from the primary (not a 2:1 octave), prefer their consensus.
+    """
+    import librosa
+
+    tempo = _extract_bpm_primary(y, sr, y_bass)
+
+    try:
+        odf = librosa.onset.onset_strength(y=y, sr=sr, hop_length=512)
+        tg_tempo = float(librosa.feature.tempo(onset_envelope=odf, sr=sr)[0])
+        plp_curve = librosa.beat.plp(onset_envelope=odf, sr=sr, hop_length=512)
+        plp_tempo = float(librosa.feature.tempo(onset_envelope=plp_curve, sr=sr)[0])
+
+        def _snap_octave(val: float, ref: float) -> float:
+            if ref > 0 and 1.80 <= val / ref <= 2.20:
+                return val / 2
+            if ref > 0 and 1.80 <= ref / val <= 2.20:
+                return val * 2
+            return val
+
+        tg_s = _snap_octave(tg_tempo, tempo)
+        plp_s = _snap_octave(plp_tempo, tempo)
+        consensus = (tg_s + plp_s) / 2
+        agree = abs(tg_s - plp_s) / (consensus + 1e-6) < 0.05
+        gap = abs(consensus - tempo) / (tempo + 1e-6)
+
+        logger.info(
+            "_extract_bpm: primary=%.1f tg=%.1f(→%.1f) plp=%.1f(→%.1f) gap=%.1f%%",
+            tempo, tg_tempo, tg_s, plp_tempo, plp_s, gap * 100,
+        )
+        if agree and 0.07 <= gap <= 0.25:
+            logger.info(
+                "_extract_bpm: tg+plp consensus=%.1f overrides primary=%.1f",
+                consensus, tempo,
+            )
+            return consensus
+    except Exception as exc:
+        logger.warning("_extract_bpm: tg/plp cross-check failed (%s)", exc)
+
+    return tempo
 
 
 def _detect_bpm_variable(
@@ -619,6 +717,150 @@ def _louder_pair_bpm(estimates: list[int], rms_values: list[float]) -> int:
         closest = min(unique, key=lambda u: abs(u - bpm_val))
         rms_by_bpm[closest] += rms
     return max(rms_by_bpm, key=lambda u: rms_by_bpm[u])
+
+
+def _scan_bpm_5windows(
+    wav_path: "Path",
+    total_sec: float,
+) -> "list[tuple[float, float]]":
+    """Load the full track at _SCAN_SR, detect intro end via RMS, split remaining
+    duration into 5 equal windows, return (rms, bpm) per window.
+
+    Exactly 5 beat_track calls regardless of song length.
+    Longer songs get longer windows → more beats per window → more reliable estimates.
+    """
+    import librosa
+
+    try:
+        y, _ = librosa.load(str(wav_path), sr=_SCAN_SR, mono=True)
+    except Exception as exc:
+        logger.warning("_scan_bpm_5windows: load failed (%s)", exc)
+        return []
+
+    # Scan 5s RMS chunks from the start. Find the first consecutive pair
+    # of chunks both above 25% of the track's RMS peak → that is where
+    # the main music begins (quiet talking/silence is excluded; full-energy
+    # musical intros are included, as they are still vote-diluted by the
+    # majority of the track).
+    INTRO_CHUNK_SEC = 5.0
+    INTRO_THRESHOLD = 0.25
+    chunk_n = int(INTRO_CHUNK_SEC * _SCAN_SR)
+    n_chunks = len(y) // chunk_n
+    rms_chunks = [
+        float(np.sqrt(np.mean(y[i * chunk_n:(i + 1) * chunk_n] ** 2)))
+        for i in range(n_chunks)
+    ]
+    max_rms = max(rms_chunks) if rms_chunks else 1.0
+
+    intro_end_sec = 0.0
+    for i in range(len(rms_chunks) - 1):
+        if (rms_chunks[i] >= max_rms * INTRO_THRESHOLD
+                and rms_chunks[i + 1] >= max_rms * INTRO_THRESHOLD):
+            intro_end_sec = i * INTRO_CHUNK_SEC
+            break
+
+    logger.info("_scan_bpm_5windows: intro_end=%.1fs total=%.1fs", intro_end_sec, total_sec)
+
+    intro_samples = int(intro_end_sec * _SCAN_SR)
+    y_active = y[intro_samples:]
+
+    if len(y_active) < int(30.0 * _SCAN_SR):  # too short to vote
+        return []
+
+    n = len(y_active)
+    win = n // 5
+
+    results: list[tuple[float, float]] = []
+    for i in range(5):
+        start = i * win
+        end = (i + 1) * win if i < 4 else n  # last window takes remainder
+        window = y_active[start:end]
+        rms = float(np.sqrt(np.mean(window ** 2)))
+        t, _ = librosa.beat.beat_track(y=window, sr=_SCAN_SR, start_bpm=120)
+        bpm_est = float(t[0]) if hasattr(t, "__len__") else float(t)
+        if not (40 <= bpm_est <= 300):
+            bpm_est = 120.0
+        results.append((rms, bpm_est))
+
+    return results
+
+
+def _majority_bpm_from_windows(
+    window_results: "list[tuple[float, float]]",
+    primary_bpm: float,
+) -> "tuple[float, bool, list[float] | None]":
+    """Return (bpm, bpm_variable, bpm_range) from a full-track window scan.
+
+    Drops near-silent windows, snaps estimates to primary_bpm's octave
+    (corrects half-time/double-time tracker errors), clusters with ±5%
+    tolerance, then overrides primary_bpm when the majority cluster represents
+    >50% of active windows and differs from primary by more than 5%.
+    """
+    if not window_results:
+        return primary_bpm, False, None
+
+    max_rms = max(r for r, _ in window_results)
+    active = [b for r, b in window_results if r >= max_rms * 0.15]
+
+    if len(active) < 2:
+        return primary_bpm, False, None
+
+    # Snap to primary's octave: half-time (68→136) and double-time errors
+    # collapse to the correct BPM while genuine tempo shifts (130 vs 140 in DNA)
+    # survive because they are not in a 2:1 ratio with the primary.
+    snapped = _snap_to_primary([round(b) for b in active], primary_bpm)
+
+    # Greedy clustering with ±5% tolerance
+    TOLERANCE = 0.05
+    clusters: list[list[float]] = []
+    for val in snapped:
+        placed = False
+        for cluster in clusters:
+            center = sum(cluster) / len(cluster)
+            if abs(val - center) / (center + 1e-6) <= TOLERANCE:
+                cluster.append(float(val))
+                placed = True
+                break
+        if not placed:
+            clusters.append([float(val)])
+
+    clusters.sort(key=len, reverse=True)
+    total = sum(len(c) for c in clusters)
+    majority_bpm = float(round(sum(clusters[0]) / len(clusters[0])))
+    majority_fraction = len(clusters[0]) / total
+
+    logger.info(
+        "_majority_bpm_from_windows: %d active windows, %d clusters, "
+        "majority=%.1f (%.0f%%), primary=%.1f",
+        len(active), len(clusters), majority_bpm, majority_fraction * 100, primary_bpm,
+    )
+
+    # Flag variable when at least two clusters each cover ≥30% of windows
+    significant = [c for c in clusters if len(c) / total >= _SWITCH_MIN_FRACTION]
+    bpm_variable = len(significant) >= 2
+    bpm_range: "list[float] | None" = None
+    if bpm_variable:
+        centers = sorted(float(round(sum(c) / len(c))) for c in significant)
+        bpm_range = [centers[0], centers[-1]]
+
+    # Override primary only when:
+    #   - majority is clear (>50% of active windows)
+    #   - gap is large enough to exceed 11kHz scan drift (>7%)
+    #   - gap is small enough to be a real tempo shift, not meter confusion (<25%)
+    # The 7% floor prevents false overrides caused by systematic BPM drift at
+    # reduced sample rate (e.g. Shoulda Never scans at 129 vs true 136 = 5.1%).
+    # The 25% ceiling blocks meter-induced errors (Take Five dotted-quarter = 32%).
+    MIN_OVERRIDE_GAP = 0.07
+    MAX_OVERRIDE_DELTA = 0.25
+    gap = abs(majority_bpm - primary_bpm) / (primary_bpm + 1e-6)
+    if majority_fraction > 0.50 and MIN_OVERRIDE_GAP < gap <= MAX_OVERRIDE_DELTA:
+        logger.info(
+            "_majority_bpm_from_windows: overriding primary %.1f → majority %.1f (gap=%.0f%%)",
+            primary_bpm, majority_bpm, gap * 100,
+        )
+        return majority_bpm, bpm_variable, bpm_range
+
+    return primary_bpm, bpm_variable, bpm_range
 
 
 PITCH_CLASSES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
@@ -816,7 +1058,12 @@ def _detect_key(
             if alias_score > best_score * 0.30:
                 alias_dist = float(avg_cv[(pk_root_idx + 1) % 12])
                 detected_dist = float(avg_cv[(pk_root_idx + 2) % 12])
-                if alias_dist > detected_dist:
+                # alias_dist must be genuinely present (z > 0), not merely the
+                # less-absent of two missing notes — otherwise the check misfires
+                # on modal tracks where both distinguishing tones are weak
+                # (So What: D# = -0.17 vs E = -0.60, both absent → D Minor is
+                # already correct and must not be flipped to G Minor).
+                if alias_dist > detected_dist and alias_dist > 0.0:
                     logger.info(
                         "_detect_key: 5th-alias %s → %s "
                         "(alias_dist=%.2f > det_dist=%.2f, score=%.3f)",
@@ -824,6 +1071,43 @@ def _detect_key(
                     )
                     best_key, best_score = alias_key, alias_score
                     correction_fired = True
+
+        # Parallel-key tie-breaker: when the raw top-2 are the major and minor
+        # of the SAME root within a tiny score gap, Krumhansl can't resolve the
+        # mode.  Decide by the 3rd; when both 3rds are absent (distortion or
+        # power-chord writing hides them), fall back to the 6th.
+        ranked = sorted(all_scores.items(), key=lambda kv: kv[1], reverse=True)
+        (k1, s1), (k2, s2) = ranked[0], ranked[1]
+        r1, m1 = k1.split()
+        r2, m2 = k2.split()
+        if r1 == r2 and m1 != m2 and (s1 - s2) < 0.05 and best_key in (k1, k2):
+            root_idx = PITCH_CLASSES.index(r1)
+            maj_third = float(avg_cv[(root_idx + 4) % 12])
+            min_third = float(avg_cv[(root_idx + 3) % 12])
+            if maj_third < 0.0 and min_third < 0.0:
+                maj_sixth = float(avg_cv[(root_idx + 9) % 12])
+                min_sixth = float(avg_cv[(root_idx + 8) % 12])
+                tie_mode = "Minor" if min_sixth > maj_sixth else "Major"
+                basis = f"6th(min={min_sixth:.2f},maj={maj_sixth:.2f})"
+            else:
+                tie_mode = "Minor" if min_third > maj_third else "Major"
+                basis = f"3rd(min={min_third:.2f},maj={maj_third:.2f})"
+            tie_key = f"{r1} {tie_mode}"
+            if tie_key != best_key:
+                logger.info(
+                    "_detect_key: parallel-tie %s → %s via %s (gap=%.4f)",
+                    best_key, tie_key, basis, s1 - s2,
+                )
+                best_key, best_score = tie_key, all_scores[tie_key]
+                correction_fired = True
+
+    if all_chroma_vecs:
+        _ranked = sorted(all_scores.items(), key=lambda kv: kv[1], reverse=True)
+        _dom_pc = PITCH_CLASSES[int(np.argmax(np.mean(all_chroma_vecs, axis=0)))]
+        logger.info(
+            "_detect_key: ranked=%s dom_chroma=%s best=%s",
+            [(k, round(v, 4)) for k, v in _ranked[:4]], _dom_pc, best_key,
+        )
 
     confidence = round(float(np.clip(best_score, 0.0, 1.0)), 2)
 

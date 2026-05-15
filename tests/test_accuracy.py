@@ -47,7 +47,7 @@ GROUND_TRUTH = [
         "sig_not_like_us",
         "https://www.youtube.com/watch?v=H58vbez_m4E",
         101, "F Minor",    # Kendrick Lamar – Not Like Us; first ~30s intro is a different key; main body is F Minor
-        None, "detector finds C Major at conf=0.96; investigating why F Minor is not surfacing past the intro",
+        None, "SSM window lands in a C-tonic section; detects C Minor (v of F Minor) — tonic centre off by a 4th",
     ),
     (
         "sig_get_it_sexyy",
@@ -66,6 +66,47 @@ GROUND_TRUTH = [
         "https://www.youtube.com/watch?v=nfs8NYg7yQM",
         100, "D# Minor",   # Charlie Puth – Attention (Eb Minor)
         None, None,        # fixed: 5th-alias distinguishing-tone check (B > C in chroma)
+    ),
+    (
+        "sig_take_five",
+        "https://www.youtube.com/watch?v=vmDDOFXSgAs",
+        174, "D# Minor",   # Dave Brubeck – Take Five (Eb Minor); 5/4 time
+        None,
+        "modal jazz; Eb Dorian inflection may not surface as D# Minor via Krumhansl",
+    ),
+    (
+        "sig_so_what",
+        "https://www.youtube.com/watch?v=zqNTltOGh5c",
+        136, "D Minor",    # Miles Davis – So What; D Dorian (closest diatonic = D Minor); Tunebat/human: 136-137 BPM
+        "free-floating rubato intro has no strict BPM; tracker locks onto a different pulse than the 136 BPM main body",
+        None,              # fixed: 5th-alias guard requires alias_dist genuinely present (z > 0), not just less-absent
+    ),
+    (
+        "sig_dna",
+        "https://www.youtube.com/watch?v=NLZRYQMLDW4",
+        140, "B Minor",    # Kendrick Lamar – DNA.; original key B Phrygian → closest standard key is B Minor (only the 2nd degree differs)
+        None,              # fixed: 5-window scan gives 3× 140 votes vs 2× 130 → majority overrides SSM primary
+        "B Phrygian is modal; SSM window lands in Part 2 → detected D# Minor, not B Minor",
+    ),
+    (
+        "sig_fein",
+        "https://www.youtube.com/watch?v=U-l4ya3ejko",
+        148, "D# Minor",   # Travis Scott – FE!N (Eb Minor); ground truth corrected from ChatGPT
+        None, None,
+    ),
+    (
+        "sig_power",
+        "https://www.youtube.com/watch?v=L53gjP-TtGE",
+        154, "C Minor",    # Kanye West – POWER; Tunebat/human verified 154 BPM; pipeline detects 152 = 1.3% ✓
+        None,
+        None,              # key correct: C Minor ✓
+    ),
+    (
+        "sig_new_magic_wand",
+        "https://www.youtube.com/watch?v=2w8KUgIkAu8",
+        140, "F Minor",    # Tyler, The Creator – NEW MAGIC WAND; industrial distortion
+        None,              # BPM correct: 136 within 5% of 140
+        None,              # fixed: parallel-key tie-breaker — both 3rds absent, decide by 6th (min 6th present)
     ),
 ]
 
