@@ -198,126 +198,43 @@ async def _run_pipeline(job_id: str, url: str, job_dir: Path) -> None:
 @app.tool()
 async def get_sonic_signature(url: str, job_id: str = None) -> str:
     """
-    Downloads audio from a YouTube URL and returns its sonic signature.
-    Uses in-memory HPSS to extract BPM, key, stereo width, transient punch,
-    frequency peaks, vocal presence, and a 512-dim CLAP vibe vector.
+    Submits a YouTube URL for sonic analysis and returns immediately.
+    The pipeline runs in the background — poll get_job_status(job_id) for results.
+    Typical processing: 20-30s on GPU, 3-5 min on CPU.
 
     Args:
         url: YouTube URL of the track to analyze.
         job_id: Optional custom job ID. Auto-generated if omitted.
     """
     job_id = job_id or f"sig_{uuid.uuid4().hex[:8]}"
-
     logger.info("▶ get_sonic_signature | job=%s url=%s", job_id, url)
 
-    JOB_STORE[job_id] = {"status": "running", "started_at": time.time()}
-    t_start = time.perf_counter()
-
     try:
-        async with CONCURRENCY_LOCK:
-            import anyio
-
-            # ── Stage 1: Validate + Metadata Cache ─────────────────────────────────
-            logger.info("[1/5] Validating source …")
-            job_dir = JOBS_ROOT / job_id
-            cached_meta = load_metadata(job_dir)
-            if cached_meta:
-                logger.info("Fast-Resume: Loaded metadata from disk for job=%s", job_id)
-                source_info = cached_meta
-            else:
-                source_info = await anyio.to_thread.run_sync(validate_source, url)
-                try:
-                    save_metadata(job_dir, source_info)
-                    logger.info("Persisted metadata.json for job=%s", job_id)
-                except Exception as e:
-                    logger.warning(
-                        "Could not persist metadata for job=%s: %s", job_id, e
-                    )
-
-            # ── Fast Resume Check ─────────────────────────────────────────────────
-            wav_path = job_dir / "input.wav"
-            if wav_path.exists():
-                logger.info(
-                    "Fast-Resume: Found existing WAV at %s. Skipping download & convert.",
-                    wav_path,
-                )
-            else:
-                # ── Stage 2: Download ─────────────────────────────────────────────────
-                logger.info("[2/5] Downloading audio stream …")
-                raw_audio_path = await anyio.to_thread.run_sync(
-                    download_audio, url, job_id, JOBS_ROOT
-                )
-
-                # ── Stage 3: Convert ──────────────────────────────────────────────────
-                logger.info("[3/5] Converting to 44.1kHz WAV …")
-                wav_path = await anyio.to_thread.run_sync(
-                    convert_to_wav, raw_audio_path
-                )
-
-            # ── Stage 4: Stem Separation ──────────────────────────────────────────
-            # asyncio.to_thread is used here (not anyio.to_thread.run_sync) because
-            # the MCP server's anyio task group can cancel tasks mid-flight during
-            # long-running stages. asyncio.to_thread runs in the standard executor
-            # and is not subject to anyio's cancellation machinery.
-            logger.info("[4/5] Separating stems (Demucs mdx_extra) …")
-            stems_dir = await asyncio.to_thread(separate_stems, wav_path)
-            if stems_dir:
-                logger.info("[4/5] Stems ready at %s", stems_dir)
-            else:
-                logger.info("[4/5] Stem separation unavailable — will use HPSS")
-
-            # ── Stage 5: Analyze + Vectorize ──────────────────────────────────────
-            logger.info("[5/5] Running analysis and vibe vectorization …")
-            features = await asyncio.to_thread(analyze_audio, wav_path, stems_dir)
-            logger.info(
-                "[5/5] Analysis complete: bpm=%.1f key=%s confidence=%.2f",
-                features["bpm"],
-                features["key"],
-                features.get("mode_confidence", 0),
-            )
-
-            vibe_vector = await asyncio.to_thread(generate_vibe_vector, wav_path)
-            logger.info("[5/5] Vectorize complete: dim=%d", len(vibe_vector))
-
-            # ── Assemble payload ──────────────────────────────────────────────────
-            elapsed = time.perf_counter() - t_start
-            payload = assemble_payload(
-                job_id=job_id,
-                features=features,
-                vibe_vector=vibe_vector,
-                inference_time=elapsed,
-                cpu_samples=[],
-                source_info=source_info,
-            )
-
-            JOB_STORE[job_id] = {"status": "success", "payload": payload}
-            result = json.dumps(payload, indent=2)
-            logger.info(
-                "✓ get_sonic_signature | job=%s elapsed=%.1fs response_bytes=%d",
-                job_id,
-                elapsed,
-                len(result),
-            )
-            _cleanup_job_artifacts(job_dir)
-            return result
-
-    except BaseException as exc:
-        elapsed = time.perf_counter() - t_start
+        validate_url_format(url)
+    except ValueError as exc:
         error_payload = {
             "header": {"job_id": job_id, "status": "error", "confidence_score": 0.0},
             "error": {"type": type(exc).__name__, "message": str(exc)},
-            "telemetry": {"inference_time_sec": round(elapsed, 2)},
+            "telemetry": {"inference_time_sec": 0.0},
         }
-        JOB_STORE[job_id] = {"status": "error", "payload": error_payload}
-        logger.error(
-            "✗ get_sonic_signature | job=%s elapsed=%.1fs error=%s: %s",
-            job_id,
-            elapsed,
-            type(exc).__name__,
-            exc,
-            exc_info=True,
-        )
+        logger.warning("✗ get_sonic_signature | job=%s bad URL: %s", job_id, exc)
         return json.dumps(error_payload, indent=2)
+
+    job_dir = JOBS_ROOT / job_id
+    JOB_STORE[job_id] = {"status": "queued", "started_at": time.time()}
+    asyncio.create_task(_run_pipeline(job_id, url, job_dir))
+
+    return json.dumps(
+        {
+            "status": "queued",
+            "job_id": job_id,
+            "message": (
+                f"Job {job_id} queued. "
+                "Call get_job_status to poll for results."
+            ),
+        },
+        indent=2,
+    )
 
 
 @app.tool()
