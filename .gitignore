@@ -67,3 +67,9 @@ benchmark_kaggle.py
 benchmark_results.json
 kaggle_output/
 $null
+
+# Developer files
+CLAUDE.md
+_diag_keys.py
+smoke_test.py
+tools/
