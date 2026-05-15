@@ -46,17 +46,7 @@ def validate_source(url: str) -> dict:
     Returns a dict with title, duration, uploader, and thumbnail.
     Raises ValueError for unsupported or unreachable sources.
     """
-    parsed = urlparse(url)
-
-    if not parsed.scheme or not parsed.netloc:
-        raise ValueError(f"Invalid URL format: {url!r}")
-
-    host = parsed.netloc.lstrip("www.")
-    if host not in SUPPORTED_HOSTS and not _is_direct_audio(url):
-        raise ValueError(
-            f"Unsupported source: '{parsed.netloc}'. "
-            f"Supported: {', '.join(sorted(SUPPORTED_HOSTS))}"
-        )
+    validate_url_format(url)
 
     cmd = [
         "yt-dlp",

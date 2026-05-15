@@ -144,32 +144,25 @@ class TestValidateSource:
 from pipeline.ingestion import validate_url_format
 
 
-def test_validate_url_format_accepts_youtube():
-    # Should not raise
-    validate_url_format("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+class TestValidateUrlFormat:
+    def test_accepts_youtube(self):
+        # Should not raise
+        validate_url_format("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
 
+    def test_accepts_youtu_be(self):
+        validate_url_format("https://youtu.be/dQw4w9WgXcQ")
 
-def test_validate_url_format_accepts_youtu_be():
-    validate_url_format("https://youtu.be/dQw4w9WgXcQ")
+    def test_accepts_direct_audio(self):
+        validate_url_format("https://example.com/track.mp3")
 
+    def test_rejects_no_scheme(self):
+        with pytest.raises(ValueError, match="Invalid URL format"):
+            validate_url_format("www.youtube.com/watch?v=abc")
 
-def test_validate_url_format_accepts_direct_audio():
-    validate_url_format("https://example.com/track.mp3")
+    def test_rejects_unsupported_domain(self):
+        with pytest.raises(ValueError, match="Unsupported source"):
+            validate_url_format("https://vimeo.com/123456")
 
-
-def test_validate_url_format_rejects_no_scheme():
-    import pytest
-    with pytest.raises(ValueError, match="Invalid URL format"):
-        validate_url_format("www.youtube.com/watch?v=abc")
-
-
-def test_validate_url_format_rejects_unsupported_domain():
-    import pytest
-    with pytest.raises(ValueError, match="Unsupported source"):
-        validate_url_format("https://vimeo.com/123456")
-
-
-def test_validate_url_format_rejects_random_string():
-    import pytest
-    with pytest.raises(ValueError):
-        validate_url_format("not a url at all")
+    def test_rejects_random_string(self):
+        with pytest.raises(ValueError, match="Invalid URL format"):
+            validate_url_format("not a url at all")
