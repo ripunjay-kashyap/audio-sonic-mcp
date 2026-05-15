@@ -1,59 +1,33 @@
-# Audio Sonic Signature — MCP Server
+# Audio Stem Splitter & Analyzer — MCP Server
 
-An MCP (Model Context Protocol) server that accepts a YouTube URL and returns a structured **sonic signature** JSON — giving an LLM like Claude rich musical context about any song from a single tool call.
+A local demonstration of an LLM-callable machine learning pipeline for audio source separation and Music Information Retrieval (MIR). Built as a Model Context Protocol (MCP) server, it makes state-of-the-art deep learning models programmatically accessible to AI agents and LLM orchestration frameworks.
 
 ---
 
-## What Is a Sonic Signature?
+## Project Status
 
-```json
-{
-  "header": {
-    "job_id": "sig_a1b2c3d4",
-    "status": "success",
-    "confidence_score": 0.91,
-    "source_metadata": {
-      "title": "Song Title - Artist",
-      "uploader": "ArtistChannel",
-      "duration_sec": 214,
-      "url": "https://www.youtube.com/watch?v=...",
-      "genre_hint": "Music"
-    }
-  },
-  "sonic_signature": {
-    "bpm": 95.7,
-    "key": "E Minor",
-    "mode_confidence": 0.87,
-    "vibe_vector": [0.012, -0.034, ...],
-    "production_profile": {
-      "vocal_presence": "forward",
-      "transient_punch": 0.42,
-      "stereo_width": "wide",
-      "dominant_freq_peaks_hz": {
-        "harmonic": [220.0, 440.0, 880.0],
-        "percussive": [60.0, 120.0, 8000.0]
-      }
-    }
-  },
-  "telemetry": {
-    "inference_time_sec": 38.2
-  }
-}
-```
+This is a custom-mcp project running on consumer-grade hardware, not a hosted service.
 
-| Field | Description |
-|---|---|
-| `bpm` | Tempo via autocorrelation beat tracking on the percussive signal |
-| `key` | Musical key via weighted chroma fusion on the harmonic signal |
-| `mode_confidence` | Pearson correlation score for the detected key [0–1] |
-| `vibe_vector` | 512-dim CLAP semantic embedding — enables cross-modal similarity search |
-| `transient_punch` | Onset strength 97th-percentile peak-to-mean ratio |
-| `stereo_width` | L/R channel correlation |
-| `dominant_freq_peaks_hz` | Top frequency peaks per harmonic/percussive signal |
+**Hardware constraint:** Demucs and CLAP run on CPU only on the development machine. A 5-minute track takes approximately 10–15 minutes end-to-end. Production deployment at reasonable throughput would require a dedicated GPU instance (e.g. AWS `g5.xlarge` with an A10G, or equivalent GCP/Azure GPU tier) — cost-prohibitive for personal hosting.
+
+**What this project demonstrates:** ML pipeline architecture, integration of multiple deep learning models (Demucs, CLAP), async system design for high-latency inference workloads, and MCP server implementation. The bottleneck is hardware budget, not software design — the same codebase runs in minutes on GPU.
+
+---
+
+## Problem Statement
+
+Extracting high-quality isolated audio stems and semantic metadata from raw web audio is traditionally a manual, brittle, multi-tool process. ML workflows, automated music production, and audio dataset curation all require clean, structured, programmatic access to these features.
+
+Compounding this is the operational challenge of deploying deep learning inference pipelines: managing conflicting system-level dependencies (CUDA, FFmpeg, tensor runtimes) in reproducible environments, and handling the latency characteristics of large model inference without blocking orchestrating agents.
+
+This project addresses both by wrapping a 6-stage AI audio processing pipeline in a robust MCP server designed for asynchronous, high-latency inference workloads.
 
 ---
 
 ## Architecture
+
+The pipeline is modular and idempotent, with built-in checkpointing for fault-tolerant execution across long-running batch jobs.
+
 
 ```text
   LLM Agent / Claude Desktop
@@ -62,87 +36,178 @@ An MCP (Model Context Protocol) server that accepts a YouTube URL and returns a 
            v
 +--------------------------------------------------------------------------+
 |  FastMCP Server  (server.py)                                             |
-|  get_sonic_signature · get_job_status · list_jobs · check_health        |
+|  split_audio · get_job_status · list_jobs · check_health                |
 |  asyncio.Lock (one job at a time)  +  in-memory job store               |
 +----------------------------------+---------------------------------------+
                                    |
                                    v
 +--------------------------------------------------------------------------+
-|  5-Stage Pipeline                                                        |
+|  6-Stage Inference Pipeline                                              |
 |                                                                          |
-|  Stage 1 — Validate    yt-dlp probe         -->  metadata.json          |
+|  Stage 1 — Ingest      yt-dlp probe         -->  metadata.json          |
 |  Stage 2 — Download    yt-dlp audio stream  -->  raw audio file         |
 |  Stage 3 — Convert     FFmpeg               -->  44.1 kHz WAV           |
-|  Stage 4 — Analyze     librosa HPSS + MIR   -->  BPM, key, features    |
-|  Stage 5 — Vectorize   CLAP (laion)         -->  512-dim vibe vector    |
+|  Stage 4 — Separate    Demucs (htdemucs)    -->  4 stem WAVs            |
+|  Stage 5 — Analyze     librosa MIR          -->  BPM, key, peaks        |
+|  Stage 6 — Embed       CLAP (laion)         -->  512-dim vector         |
 +----------------------------------+---------------------------------------+
                                    |
                                    v
 +--------------------------------------------------------------------------+
-|  Sonic Signature JSON                                                    |
-|  header:           job_id, status, confidence_score, source_metadata    |
+|  JSON Payload                                                            |
+|  header:           job_id, status, confidence_score, source_meta        |
+|  stems_metadata:   file paths, SDR quality metric                       |
 |  sonic_signature:  BPM, key, vibe_vector, production_profile            |
 |  telemetry:        inference_time_sec                                    |
 +--------------------------------------------------------------------------+
 ```
 
-**Stage 4 — Analysis:** Uses `librosa.effects.hpss()` to separate the audio into harmonic and percussive signals in memory. BPM is extracted from the percussive signal (cleaner beat tracking), key from the harmonic signal (chroma uncontaminated by drums). All other features run on the appropriate signal. No files written — analysis is entirely in-memory.
+**Stage 1 — Ingestion:** URL validation and metadata probing via `yt-dlp`. Enforces a 60-minute duration limit and persists source metadata to disk atomically (tmp-rename pattern) to avoid re-probing on resume.
 
-**Stage 5 — Vectorization:** Passes the full audio mix through **CLAP** (`laion/larger_clap_music_and_speech`) to produce a 512-dim embedding that maps audio into the same latent space as text — enabling semantic similarity search. Falls back to a librosa mel+MFCC composite if CLAP is unavailable.
+**Stage 2–3 — Download & Normalization:** Pulls the highest-quality audio-only stream (no video mux), then standardizes to 44.1kHz mono WAV via `FFmpeg`, ensuring consistent tensor shapes for downstream model ingestion.
+
+**Stage 4 — Source Separation (Inference):** Runs Facebook's **Demucs** (Hybrid Transformer architecture, `htdemucs`) to decompose the audio mixture into four isolated stems: `vocals`, `drums`, `bass`, `other`. Computes a proxy SDR (Source-to-Distortion Ratio) as a separation quality metric used downstream in confidence scoring.
+
+**Stage 5 — MIR Feature Extraction:** Uses `librosa` to extract deterministic musical features per stem:
+- BPM via autocorrelation beat tracking (drums stem preferred; genre-aware doubling heuristic for trap/hip-hop)
+- Musical key via weighted chroma fusion (60% bass / 40% harmonic content), with HPSS pre-filtering to remove percussive leakage before CQT chroma extraction
+- Transient punch from onset strength envelope (97th-percentile peak-to-mean ratio)
+- Dominant frequency peaks per stem (20Hz–16kHz masked FFT)
+- Stereo width via L/R channel correlation
+- Vocal presence via RMS ratio of vocals-to-mix
+
+**Stage 6 — Semantic Embedding:** Passes the stem mix through **CLAP** (Contrastive Language-Audio Pretraining, `laion/larger_clap_music_and_speech`) to generate a 512-dimensional vector embedding. CLAP maps audio into the same latent space as text, enabling cross-modal similarity search ("find tracks that sound like this") without text labels. Falls back gracefully to a hand-engineered 512-dim librosa composite (mel-spectrogram, MFCC, chroma, spectral statistics, Tonnetz) if CLAP is unavailable, maintaining a consistent output schema for downstream consumers.
 
 ---
 
-## System Requirements
+## System Design: Handling Inference Latency
 
-- Python 3.10+
-- FFmpeg (must be on PATH)
-- yt-dlp (installed via pip)
+### The Constraint
 
-**Optional — CLAP vibe vectors (~4 GB download):**
-```bash
-pip install transformers torch torchaudio --index-url https://download.pytorch.org/whl/cpu
-# or: pip install ".[clap]"
+Demucs and CLAP are computationally heavy. This project runs on a local CPU — the tested environment — where processing a 5-minute track takes approximately 10–15 minutes end-to-end. Standard synchronous request-response patterns are not viable at these latencies.
+
+### The Solutions
+
+**Asynchronous Job Orchestration:** The MCP server accepts a job submission and returns a `job_id` immediately, decoupling the orchestrating LLM's context window from the inference runtime. A `get_job_status` endpoint allows polling asynchronously.
+
+**Idempotent Pipeline with Checkpointing:** Intermediate artifacts (downloaded audio, converted WAV, separated stem files) are persisted to a per-job directory. If a job is interrupted (e.g., OOM during model inference), the pipeline detects existing artifacts and resumes from the last successful stage rather than re-executing expensive upstream work.
+
+**Concurrency Serialization:** A single `asyncio.Lock` serializes all Demucs/CLAP jobs. This prevents RAM exhaustion from overlapping inference runs on constrained hardware, trading throughput for stability — the correct trade-off for a single-node deployment.
+
+**Thread Isolation for ML Workloads:** Long-running synchronous ML stages (librosa, CLAP) are dispatched via `asyncio.to_thread()` rather than `anyio.to_thread.run_sync()`. This avoids anyio's task cancellation machinery interrupting mid-flight tensor operations.
+
+---
+
+## Technical Stack
+
+**Machine Learning and AI:**
+- PyTorch and Hugging Face Transformers for model loading and tensor operations
+- Demucs (Meta AI) — Hybrid Spectrogram/Waveform Transformer for music source separation
+- LAION CLAP — contrastive audio/language model for multi-modal semantic embeddings
+
+**Audio Processing and MIR:**
+- librosa — algorithmic feature extraction (BPM, key, spectral analysis)
+- FFmpeg — media normalization and stream conversion
+
+**Infrastructure and MLOps:**
+- FastMCP — exposes the pipeline as a standardized MCP tool server for LLM agents
+- Docker/Podman — containerization for reproducible deployment of GPU drivers (CUDA/ROCm) and system dependencies
+- anyio — async I/O abstraction layer for the MCP runtime
+
+---
+
+## Output Schema
+
+```json
+{
+  "header": {
+    "job_id": "sig_a3f9b2c1",
+    "status": "success",
+    "confidence_score": 0.91,
+    "source_metadata": {
+      "title": "Track Name",
+      "uploader": "Artist",
+      "duration_sec": 214,
+      "genre_hint": "Music"
+    }
+  },
+  "stems_metadata": {
+    "local_root": "/tmp/audio_stems/sig_a3f9b2c1/stems/",
+    "files": ["vocals.wav", "drums.wav", "bass.wav", "other.wav"],
+    "sdr_ratio": 8.4
+  },
+  "sonic_signature": {
+    "bpm": 128.05,
+    "key": "F# Minor",
+    "mode_confidence": 0.74,
+    "vibe_vector": [0.012, -0.034, 0.091, "... 512 dims ..."],
+    "production_profile": {
+      "vocal_presence": "forward",
+      "drum_transient_punch": 0.781,
+      "stereo_width": "wide",
+      "dominant_freq_peaks_hz": {
+        "bass": [55.0, 110.2, 82.4],
+        "drums": [8372.0, 125.0, 250.1]
+      }
+    }
+  },
+  "telemetry": {
+    "inference_time_sec": 47.3
+  }
+}
 ```
 
+The `confidence_score` is a weighted heuristic: 60% SDR separation quality + 40% feature extraction success, giving downstream consumers a single trust signal without requiring knowledge of the internal pipeline state.
+
 ---
 
-## Setup
+## Quick Start
+
+### Local Development (Tested)
 
 ```bash
 python -m venv .venv
-.venv\Scripts\activate      # Windows
-# source .venv/bin/activate # macOS/Linux
+source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
+
+# Optional: CLAP semantic embeddings (~4 GB additional download)
+pip install ".[clap]"
+
+# Run the test suite (synthetic audio, no downloads required)
+pytest -v tests/
+
+# Full end-to-end smoke test
+python smoke_test.py <youtube_url>
 ```
 
----
+### Containerized Deployment (Untested on Development Hardware)
 
-## Running the Server
+A Dockerfile is included for environments with GPU access. Cloud GPU deployment (e.g. AWS `g5`, GCP `n1` with T4) is out of scope for this project due to cost, but the container is structured to support it.
 
 ```bash
-python server.py
-
-# Custom job directory
-JOBS_ROOT=/data/jobs python server.py
+docker build -t audio-stem-mcp .
+mkdir -p stems models
+docker run -it --rm \
+  -v $(pwd)/stems:/app/stems \
+  -v $(pwd)/models:/app/models \
+  audio-stem-mcp
 ```
 
-The server communicates over stdio (MCP protocol). Use Claude Desktop or an MCP client to exercise the tools.
+### Claude Desktop Integration
 
----
-
-## Claude Desktop Integration
-
-Add to `%APPDATA%\Claude\claude_desktop_config.json` (Windows) or `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS):
+Add to `claude_desktop_config.json`:
 
 ```json
 {
   "mcpServers": {
-    "audio-sonic-mcp": {
-      "command": "C:\\path\\to\\.venv\\Scripts\\python.exe",
-      "args": ["C:\\path\\to\\server.py"],
-      "env": {
-        "JOBS_ROOT": "C:\\tmp\\audio_jobs"
-      }
+    "audio-stem-mcp": {
+      "command": "docker",
+      "args": [
+        "run", "-i", "--rm",
+        "-v", "/absolute/path/to/stems:/app/stems",
+        "-v", "/absolute/path/to/models:/app/models",
+        "audio-stem-mcp"
+      ]
     }
   }
 }
@@ -150,62 +215,23 @@ Add to `%APPDATA%\Claude\claude_desktop_config.json` (Windows) or `~/Library/App
 
 ---
 
-## MCP Tools
+## MCP Tools Exposed
 
 | Tool | Description |
-|---|---|
-| `get_sonic_signature(url, job_id?)` | Runs the full pipeline and returns the sonic signature JSON |
-| `get_job_status(job_id)` | Fetches a completed or in-progress job result |
-| `list_jobs()` | Lists all jobs in the current server session |
+|------|-------------|
+| `split_audio(url, job_id?, model?)` | Submits a full pipeline job; returns structured JSON payload |
+| `get_job_status(job_id)` | Polls the status and result of a submitted job |
+| `list_jobs()` | Lists all jobs and their current status |
 | `check_health()` | Verifies FFmpeg, yt-dlp, and Python package availability |
 
----
-
-## Testing
-
-```bash
-pytest                 # unit test suite (synthetic audio, no downloads)
-pytest -v tests/       # verbose
-
-python smoke_test.py   # full end-to-end via MCP stdio
-```
+Supported Demucs models: `htdemucs` (default, fastest), `htdemucs_ft` (highest quality), `htdemucs_6s` (6 stems, adds guitar and piano), `mdx_extra` (alternative architecture).
 
 ---
 
-## Container (Podman)
+## System Requirements
 
-```bash
-# Build
-podman build -t audio-sonic-mcp .
-
-# Run
-podman run -it --rm \
-  -v $(pwd)/jobs:/app/jobs:Z \
-  -v $(pwd)/models:/app/models:Z \
-  audio-sonic-mcp
-```
-
-> The `:Z` suffix sets the SELinux label. Use `docker` and drop `:Z` for Docker compatibility.
-
----
-
-## Environment Variables
-
-| Variable | Default | Description |
-|---|---|---|
-| `JOBS_ROOT` | `./jobs` | Root directory for job working files |
-| `TORCH_HOME` | `~/.cache/torch` | Cache directory for CLAP model weights |
-| `HF_HOME` | `~/.cache/huggingface` | Cache directory for HuggingFace model weights |
-
----
-
-## Performance
-
-On a modern CPU (no GPU required):
-
-| Stage | Time |
-|---|---|
-| Validate + Download + Convert | ~8s |
-| HPSS + Analyze | ~15–25s |
-| CLAP Vectorize | ~12s |
-| **Total** | **~35–45s** |
+- Python 3.10+
+- FFmpeg (on system PATH)
+- yt-dlp
+- Demucs
+- Optional: `transformers`, `torch`, `torchaudio` for CLAP embeddings
