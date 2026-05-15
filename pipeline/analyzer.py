@@ -224,7 +224,7 @@ def detect_key_sections(
 
     try:
         y, _ = librosa.load(str(wav_path), sr=_SR, mono=True)
-        chroma = librosa.feature.chroma_cens(y=y, sr=_SR, hop_length=_HOP)
+        chroma = librosa.feature.chroma_cqt(y=y, sr=_SR, hop_length=_HOP)
         rms = librosa.feature.rms(y=y, frame_length=1024, hop_length=_HOP)[0]
 
         block_frames = int(block_sec * _SR / _HOP)
@@ -526,13 +526,13 @@ def _extract_bpm_primary(y: np.ndarray, sr: int, y_bass: "np.ndarray | None" = N
 
 
 def _extract_bpm(y: np.ndarray, sr: int, y_bass: "np.ndarray | None" = None) -> float:
-    """Calls _extract_bpm_primary, then cross-checks with tempogram peak + PLP.
+    """Calls _extract_bpm_madmom if available, else falls back to _extract_bpm_primary
+    and cross-checks with tempogram peak + PLP."""
+    try:
+        return _extract_bpm_madmom(y, sr)
+    except Exception as exc:
+        logger.warning("_extract_bpm: madmom failed or not installed (%s). Falling back to librosa.", exc)
 
-    For music without strong percussive transients (jazz, acoustic), beat_track
-    can lock onto a subdivision rather than the fundamental quarter-note pulse.
-    Tempogram and PLP estimate periodicity independently — if both agree on a
-    value 7–25% away from the primary (not a 2:1 octave), prefer their consensus.
-    """
     import librosa
 
     tempo = _extract_bpm_primary(y, sr, y_bass)
@@ -1110,68 +1110,11 @@ def _detect_key(
             correction_fired = True
 
     # ── Post-hoc key correction ───────────────────────────────────────────────
-    # Two targeted checks that catch failure modes the Krumhansl correlator
-    # can't resolve on its own.  Both require the mean chroma vector.
+    # Targeted check that catches failure modes the Krumhansl correlator
+    # can't resolve on its own.
     if all_chroma_vecs:
         avg_cv = np.mean(all_chroma_vecs, axis=0)
-        pk_root_str, pk_mode = best_key.split()
-        pk_root_idx = PITCH_CLASSES.index(pk_root_str)
-
-        if pk_mode == "Major":
-            # Check A — absent characteristic-tone override
-            # If EITHER the major 3rd (4 semitones) OR the major 7th / leading
-            # tone (11 semitones) of the detected key has strongly negative
-            # z-scored chroma energy, the detected root is almost certainly
-            # acting as the subdominant (IV) of the true minor key.
-            # Both checks use the same -0.5 threshold; firing on either is
-            # enough because a genuine major key requires both tones to be present.
-            major_third_energy = float(avg_cv[(pk_root_idx + 4) % 12])
-            major_seventh_energy = float(avg_cv[(pk_root_idx + 11) % 12])
-            if major_third_energy < -0.5 or major_seventh_energy < -0.5:
-                candidate_root = (pk_root_idx + 7) % 12
-                candidate = f"{PITCH_CLASSES[candidate_root]} Minor"
-                c_score = all_scores.get(candidate, -np.inf)
-                if c_score > 0.5:
-                    logger.info(
-                        "_detect_key: absent-char-tone %s (3rd=%.2f 7th=%.2f) → %s (%.3f)",
-                        best_key, major_third_energy, major_seventh_energy, candidate, c_score,
-                    )
-                    best_key, best_score = candidate, c_score
-                    correction_fired = True
-
-        elif pk_mode == "Minor" and not modal_promoted:
-            # Check B — 5th-alias distinguishing-tone check
-            # When the bass pedals on the 5th degree, the chroma may treat the
-            # 5th as the root, producing an alias minor key a P5 above the true
-            # key.  Resolve by comparing the one note that distinguishes the two
-            # keys: the alias key contains (root+1) semitone; the detected key
-            # contains (root+2) semitone.  If the alias's distinctive note has
-            # more energy, prefer the alias (the true key).
-            #
-            # Skipped when modal_promoted: a Phrygian b2 (root+1) looks
-            # identical to the alias-key distinguishing tone, so 5th-alias
-            # would always flip modal-Phrygian winners to their P4 (e.g.
-            # F Phrygian → A# Minor).
-            alias_root = (pk_root_idx + 5) % 12
-            alias_key = f"{PITCH_CLASSES[alias_root]} Minor"
-            alias_score = all_scores.get(alias_key, -np.inf)
-            if alias_score > best_score * 0.30:
-                alias_dist = float(avg_cv[(pk_root_idx + 1) % 12])
-                detected_dist = float(avg_cv[(pk_root_idx + 2) % 12])
-                # alias_dist must be genuinely present (z > 0), not merely the
-                # less-absent of two missing notes — otherwise the check misfires
-                # on modal tracks where both distinguishing tones are weak
-                # (So What: D# = -0.17 vs E = -0.60, both absent → D Minor is
-                # already correct and must not be flipped to G Minor).
-                if alias_dist > detected_dist and alias_dist > 0.0:
-                    logger.info(
-                        "_detect_key: 5th-alias %s → %s "
-                        "(alias_dist=%.2f > det_dist=%.2f, score=%.3f)",
-                        best_key, alias_key, alias_dist, detected_dist, alias_score,
-                    )
-                    best_key, best_score = alias_key, alias_score
-                    correction_fired = True
-
+        
         # Parallel-key tie-breaker: when the raw top-2 are the major and minor
         # of the SAME root within a tiny score gap, Krumhansl can't resolve the
         # mode.  Decide by the 3rd; when both 3rds are absent (distortion or

@@ -39,15 +39,24 @@ def validate_source(url: str) -> dict:
             f"Supported: {', '.join(sorted(SUPPORTED_HOSTS))}"
         )
 
+    cmd = [
+        "yt-dlp",
+        "--dump-json",
+        "--no-playlist",
+        "--quiet",
+        "--geo-bypass",
+        "--extractor-args", "youtube:player_client=android",
+    ]
+    
+    proxy_url = os.environ.get("YTDLP_PROXY")
+    if proxy_url:
+        cmd.extend(["--proxy", proxy_url])
+        
+    cmd.append(url)
+
     # Probe metadata without downloading
     result = subprocess.run(
-        [
-            "yt-dlp",
-            "--dump-json",
-            "--no-playlist",
-            "--quiet",
-            url,
-        ],
+        cmd,
         stdin=DEVNULL,
         capture_output=True,
         text=True,

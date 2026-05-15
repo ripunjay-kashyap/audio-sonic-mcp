@@ -43,8 +43,17 @@ def download_audio(url: str, job_id: str, jobs_root: Path) -> Path:
         output_template,
         # No sponsorblock or chapters needed for audio analysis
         "--no-sponsorblock",
-        url,
+        # Anti-bot and geo-bypass mitigations
+        "--geo-bypass",
+        "--extractor-args", "youtube:player_client=android",
     ]
+
+    import os
+    proxy_url = os.environ.get("YTDLP_PROXY")
+    if proxy_url:
+        cmd.extend(["--proxy", proxy_url])
+
+    cmd.append(url)
 
     logger.info("Downloading: %s", url)
     result = subprocess.run(
