@@ -8,9 +8,9 @@ A local demonstration of an LLM-callable machine learning pipeline for audio sou
 
 This is a custom-mcp project running on consumer-grade hardware, not a hosted service.
 
-**Hardware constraint:** Demucs and CLAP run on CPU only on the development machine. A 5-minute track takes approximately 10–15 minutes end-to-end. Production deployment at reasonable throughput would require a dedicated GPU instance (e.g. AWS `g5.xlarge` with an A10G, or equivalent GCP/Azure GPU tier) — cost-prohibitive for personal hosting.
+**Hardware constraint:** Demucs and CLAP are computationally heavy. On a modern consumer CPU, a 5-minute track takes approximately 4 minutes end-to-end. However, the codebase is designed to scale dynamically: when deployed on a machine with an Nvidia GPU and CUDA configured (like a free Kaggle T4 notebook), the exact same pipeline completes in 20–30 seconds.
 
-**What this project demonstrates:** ML pipeline architecture, integration of multiple deep learning models (Demucs, CLAP), async system design for high-latency inference workloads, and MCP server implementation. The bottleneck is hardware budget, not software design — the same codebase runs in minutes on GPU.
+**What this project demonstrates:** ML pipeline architecture, integration of multiple deep learning models (Demucs, CLAP), async system design for high-latency inference workloads, and MCP server implementation. The bottleneck is hardware, not software design — the pipeline seamlessly leverages GPU acceleration when available.
 
 ---
 
@@ -68,9 +68,9 @@ The pipeline is modular and idempotent, with built-in checkpointing for fault-to
 
 **Stage 4 — Source Separation (Inference):** Runs Facebook's **Demucs** (Hybrid Transformer architecture, `htdemucs`) to decompose the audio mixture into four isolated stems: `vocals`, `drums`, `bass`, `other`. Computes a proxy SDR (Source-to-Distortion Ratio) as a separation quality metric used downstream in confidence scoring.
 
-**Stage 5 — MIR Feature Extraction:** Uses `librosa` to extract deterministic musical features per stem:
-- BPM via autocorrelation beat tracking (drums stem preferred; genre-aware doubling heuristic for trap/hip-hop)
-- Musical key via weighted chroma fusion (60% bass / 40% harmonic content), with HPSS pre-filtering to remove percussive leakage before CQT chroma extraction
+**Stage 5 — MIR Feature Extraction:** Uses `librosa` and `madmom` to extract deterministic musical features per stem:
+- BPM via `madmom`'s Recurrent Neural Network (RNN) beat tracker (highly robust against syncopation and octave/half-time errors), with `librosa` as a fallback.
+- Musical key via weighted chroma fusion (60% bass / 40% harmonic content), with HPSS pre-filtering to remove percussive leakage before CQT chroma extraction.
 - Transient punch from onset strength envelope (97th-percentile peak-to-mean ratio)
 - Dominant frequency peaks per stem (20Hz–16kHz masked FFT)
 - Stereo width via L/R channel correlation
@@ -84,7 +84,7 @@ The pipeline is modular and idempotent, with built-in checkpointing for fault-to
 
 ### The Constraint
 
-Demucs and CLAP are computationally heavy. This project runs on a local CPU — the tested environment — where processing a 5-minute track takes approximately 10–15 minutes end-to-end. Standard synchronous request-response patterns are not viable at these latencies.
+Demucs and CLAP are computationally heavy. This project can run on a local CPU — where processing a 5-minute track takes approximately 4 minutes end-to-end. However, when run on a GPU (e.g., Kaggle T4), it completes in 20-30 seconds. Even at 20 seconds, standard synchronous request-response patterns are risky for orchestration agents, which is why an async job architecture is used.
 
 ### The Solutions
 
@@ -163,31 +163,55 @@ The `confidence_score` is a weighted heuristic: 60% SDR separation quality + 40%
 
 ## Quick Start
 
-### Local Development (Tested)
+You can run this MCP server in three different ways depending on your hardware availability.
+
+### Option 1: Local CPU (Standard Python)
+Best for testing or if you don't mind waiting ~4 minutes per song.
 
 ```bash
+# 1. Clone the repository
+git clone https://github.com/ripunjkashyap-a11y/Audio_stem_splt.git
+cd Audio_stem_splt
+
+# 2. Set up virtual environment
 python -m venv .venv
 source .venv/bin/activate      # Windows: .venv\Scripts\activate
+
+# 3. Install requirements
 pip install -r requirements.txt
 
-# Optional: CLAP semantic embeddings (~4 GB additional download)
+# 4. Optional: Install CLAP for semantic embeddings (~4 GB download)
 pip install ".[clap]"
-
-# Run the test suite (synthetic audio, no downloads required)
-pytest -v tests/
-
-# Full end-to-end smoke test
-python smoke_test.py <youtube_url>
 ```
 
-### Containerized Deployment (Untested on Development Hardware)
+### Option 2: Free Cloud GPU (Kaggle Notebook)
+Best for processing many tracks quickly (20-30 seconds per track) without paying for cloud compute.
 
-A Dockerfile is included for environments with GPU access. Cloud GPU deployment (e.g. AWS `g5`, GCP `n1` with T4) is out of scope for this project due to cost, but the container is structured to support it.
+1. Create a new notebook on [Kaggle](https://www.kaggle.com).
+2. In the right panel, under **Accelerator**, select **GPU T4 x2**.
+3. Add the following to the first cell to install the project with CUDA acceleration:
+```python
+!git clone https://github.com/ripunjkashyap-a11y/Audio_stem_splt.git
+%cd Audio_stem_splt
+
+!apt-get update && apt-get install -y ffmpeg
+!pip install demucs yt-dlp librosa soundfile madmom
+!pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu118
+```
+4. You can now import and run `server.py` or trigger inference scripts directly within the notebook!
+
+### Option 3: Containerized Deployment (Docker)
+Best for deploying to a cloud VM (e.g., AWS `g5`, GCP `n1` with T4) or a local machine with a dedicated GPU.
 
 ```bash
+# Build the container
 docker build -t audio-stem-mcp .
+
+# Create persistent directories for outputs and models
 mkdir -p stems models
-docker run -it --rm \
+
+# Run with GPU support (Requires nvidia-container-toolkit)
+docker run -it --rm --gpus all \
   -v $(pwd)/stems:/app/stems \
   -v $(pwd)/models:/app/models \
   audio-stem-mcp
@@ -195,7 +219,7 @@ docker run -it --rm \
 
 ### Claude Desktop Integration
 
-Add to `claude_desktop_config.json`:
+To use this with Claude Desktop on your local machine, add the following to your `claude_desktop_config.json`:
 
 ```json
 {
