@@ -103,8 +103,6 @@ async def _run_pipeline(job_id: str, url: str, job_dir: Path) -> None:
     t_start = time.perf_counter()
     try:
         async with CONCURRENCY_LOCK:
-            import anyio
-
             # Stage 1: Validate + Metadata Cache
             logger.info("[1/5] Validating source …")
             cached_meta = load_metadata(job_dir)
@@ -112,7 +110,7 @@ async def _run_pipeline(job_id: str, url: str, job_dir: Path) -> None:
                 logger.info("Fast-Resume: Loaded metadata from disk for job=%s", job_id)
                 source_info = cached_meta
             else:
-                source_info = await anyio.to_thread.run_sync(validate_source, url)
+                source_info = await asyncio.to_thread(validate_source, url)
                 try:
                     save_metadata(job_dir, source_info)
                     logger.info("Persisted metadata.json for job=%s", job_id)
@@ -129,13 +127,13 @@ async def _run_pipeline(job_id: str, url: str, job_dir: Path) -> None:
             else:
                 # Stage 2: Download
                 logger.info("[2/5] Downloading audio stream …")
-                raw_audio_path = await anyio.to_thread.run_sync(
+                raw_audio_path = await asyncio.to_thread(
                     download_audio, url, job_id, JOBS_ROOT
                 )
 
                 # Stage 3: Convert
                 logger.info("[3/5] Converting to 44.1kHz WAV …")
-                wav_path = await anyio.to_thread.run_sync(convert_to_wav, raw_audio_path)
+                wav_path = await asyncio.to_thread(convert_to_wav, raw_audio_path)
 
             # Stage 4: Stem Separation
             # asyncio.to_thread avoids anyio cancellation machinery on long-running stages
