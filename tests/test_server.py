@@ -49,6 +49,7 @@ async def test_get_sonic_signature_uses_provided_job_id():
 
 @pytest.mark.asyncio
 async def test_get_sonic_signature_stores_queued_status():
+    """Submitted job is recorded in JOB_STORE with 'queued' status."""
     with patch("server._run_pipeline", new=AsyncMock()):
         await get_sonic_signature(
             "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
@@ -78,7 +79,8 @@ async def test_unsupported_domain_returns_error_immediately():
 @pytest.mark.asyncio
 async def test_invalid_url_not_added_to_job_store():
     await get_sonic_signature("not-a-url", job_id="bad_job")
-    assert "bad_job" not in JOB_STORE or JOB_STORE.get("bad_job", {}).get("status") == "error"
+    if "bad_job" in JOB_STORE:
+        assert JOB_STORE["bad_job"]["status"] == "error"
 
 
 # ── get_job_status ─────────────────────────────────────────────────────────────
