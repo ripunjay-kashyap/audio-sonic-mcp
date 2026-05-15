@@ -77,6 +77,8 @@ python smoke_test.py <url> <job_id>     # custom URL + job ID
 
 Four test types run per song: `test_bpm_within_tolerance`, `test_key_matches_ground_truth`, `test_analysis_timing`, `test_production_profile_sanity`. All four share one `analyze_audio()` call per slug via an in-process cache.
 
+Current state: **132 pass / 3 xfail** (9/11 key tests passing; xfails: `sig_not_like_us` and `sig_dna` keys — both windowing-related — and `sig_so_what` BPM — modal jazz dead-end with current stack).
+
 Ground-truth BPM and key are sourced from Songstats. Flat keys are stored as sharps (Gb→F#, Ab→G#, Eb→D#) to match the pipeline's pitch class notation.
 
 To populate the cache for all songs, run each URL once with `KEEP_JOB_FILES=1`:
@@ -129,16 +131,18 @@ The pipeline is linear — each stage feeds into the next, all orchestrated by `
 | 1 — Validate | `ingestion.py` | URL validation + yt-dlp metadata probe; enforces 60-min limit |
 | 2 — Download | `downloader.py` | yt-dlp audio-only download to `JOBS_ROOT/<job_id>/` |
 | 3 — Convert | `converter.py` | FFmpeg → 44.1kHz WAV |
-| 4 — Analyze | `analyzer.py` | HPSS in-memory separation; BPM from percussive signal, key from harmonic signal; transient punch, stereo width, dominant frequency peaks |
-| 5 — Vectorize | `vectorizer.py` | CLAP 512-dim embedding via `laion/larger_clap_music_and_speech`; falls back to librosa mel+MFCC composite if CLAP unavailable |
+| 4 — Separate | `separator.py` | Demucs `mdx_extra` splits the SSM analysis window into 4 stems (drums, bass, other, vocals). Falls back silently if model unavailable |
+| 5 — Analyze | `analyzer.py` | BPM from drums stem (HPSS fallback); key from `bass + other` stem via Krumhansl Major/Minor + Phrygian templates, per-section voting with v→i and iv→i tiebreakers; transient punch; stereo width; dominant frequency peaks |
+| 6 — Vectorize | `vectorizer.py` | CLAP 512-dim embedding via `laion/larger_clap_music_and_speech`; falls back to librosa mel+MFCC composite if CLAP unavailable |
+| 7 — Assemble | `assembler.py` | Merges all outputs into the canonical JSON payload |
 
-**Analysis window:** All three audio stages (separator, analyzer, vectorizer) call `pipeline.window.pick_window()` to choose the same slice of the track:
-- Track ≥ 75s → **30s–90s** (skips intro, lands in verse 1 / pre-chorus)
+**Analysis window (`pipeline/window.py`):** All audio stages read the same 60s slice. For long tracks the slice is chosen via a Self-Similarity Matrix scan (`find_ssm_window`) that lands on the most tonally representative 30s block — usually the first chorus. Both `separator.py` and `analyzer.py` independently call `find_ssm_window` on the same WAV (deterministic), so the stems and the analyzer's `y_mono` are always aligned.
+
+- Track ≥ 75s → **SSM chorus window** (60s centred on the best block; falls back to 30s offset on SSM error)
 - Track 30s–75s → **0s–60s** (or 0 → end if shorter than 60s)
 - Track < 30s → **the entire track** (snippet mode)
 
 Tunable via constants in `pipeline/window.py`.
-| Assemble | `assembler.py` | Merges all outputs into the canonical JSON payload |
 
 All pipeline stages run via `asyncio.to_thread()` in `server.py` — they are synchronous functions wrapped for async execution.
 
@@ -190,3 +194,5 @@ Jobs are tracked in an in-memory dict `JOB_STORE` in `server.py`. It is not pers
 **Concurrency:** A global `asyncio.Lock` (`CONCURRENCY_LOCK`) serializes all jobs — only one runs at a time.
 
 **CLAP install shorthand:** `pip install ".[clap]"` (uses the extras group in `pyproject.toml`) installs torch, torchaudio, and transformers in one command.
+
+**Stem files are pre-windowed, not full-track:** `pipeline/separator.py` writes only the 60s SSM analysis window (~10 MB per stem), not the full song. Always read them with `offset_sec=0`. The analyzer's `chorus_start` offset applies to `input.wav`, never to stems.

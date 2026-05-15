@@ -85,9 +85,10 @@ for slug, true_key in SONGS:
     print(f"  harmonic sections: {len(harmonics)}"
           + (f"  (verse HPSS at {verse_offset:.0f}s)" if chorus_start is not None else ""))
 
-    # ── accumulate key scores ─────────────────────────────────────────────
+    # ── accumulate key scores + per-section winners ──────────────────────
     win_samples = int(WIN_SEC * TARGET_SR)
     all_scores: dict[str, float] = {}
+    per_section: list[tuple[str, float]] = []
     for yh in harmonics:
         n = yh.size
         if n >= int(45 * TARGET_SR):
@@ -97,8 +98,12 @@ for slug, true_key in SONGS:
                        for k in _score_keys_for_chroma(chromas[0])}
         else:
             scores = _score_keys_for_chroma(_normalized_chroma_mean(yh, TARGET_SR))
+        sec_winner = max(scores.items(), key=lambda kv: kv[1])
+        per_section.append(sec_winner)
         for k, v in scores.items():
             all_scores[k] = all_scores.get(k, 0.0) + v
+
+    print(f"  per_section winners: {[(k, round(s, 3)) for k, s in per_section]}")
 
     ranked = sorted(all_scores.items(), key=lambda kv: kv[1], reverse=True)
     top8   = ranked[:8]

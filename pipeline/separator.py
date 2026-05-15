@@ -19,17 +19,25 @@ STEMS = ["vocals", "drums", "bass", "other"]
 
 # Module-level model cache — loaded once during pre-warm, reused per call
 _demucs_model = None
+_demucs_device: str = "cpu"
 
 
 def load_demucs_model():
-    """Download (if needed) and cache the Demucs model in memory. Call from main thread."""
-    global _demucs_model
+    """Download (if needed) and cache the Demucs model in memory. Call from main thread.
+
+    Moves the model to CUDA when available so separation can run on GPU
+    (10-20× faster than CPU for `mdx_extra`).  Falls back to CPU silently.
+    """
+    global _demucs_model, _demucs_device
     if _demucs_model is not None:
         return
+    import torch
     from demucs.pretrained import get_model
+    _demucs_device = "cuda" if torch.cuda.is_available() else "cpu"
     _demucs_model = get_model(MODEL_NAME)
+    _demucs_model.to(_demucs_device)
     _demucs_model.eval()
-    logger.info("separator: Demucs %s model loaded", MODEL_NAME)
+    logger.info("separator: Demucs %s model loaded (device=%s)", MODEL_NAME, _demucs_device)
 
 
 def separate_stems(wav_path: Path) -> "Path | None":
@@ -57,11 +65,17 @@ def separate_stems(wav_path: Path) -> "Path | None":
         model = _demucs_model
         target_sr = model.samplerate  # mdx_extra expects 44100 Hz
 
-        # Pick analysis window (see pipeline.window for tier logic)
-        from pipeline.window import pick_window
+        # Pick analysis window (see pipeline.window for tier logic).  For long
+        # tracks we run the same SSM scan the analyzer uses, so the stems land
+        # in the SSM chorus window — not the fixed 30 s default.  Both stages
+        # are deterministic for the same WAV, so calling find_ssm_window
+        # independently here is safe.
+        from pipeline.window import pick_window, find_ssm_window
         with sf.SoundFile(str(wav_path)) as snd:
             native_sr = snd.samplerate
-            offset_frames, frames = pick_window(snd.frames, native_sr)
+            total_sec = snd.frames / native_sr
+            chorus_start = find_ssm_window(wav_path, total_sec) if total_sec >= 75.0 else None
+            offset_frames, frames = pick_window(snd.frames, native_sr, chorus_start)
             snd.seek(offset_frames)
             data = snd.read(frames=frames, dtype="float32", always_2d=True)
 
@@ -80,10 +94,11 @@ def separate_stems(wav_path: Path) -> "Path | None":
             ])
 
         wav_tensor = torch.tensor(wav_np, dtype=torch.float32).unsqueeze(0)  # [1, 2, T]
+        wav_tensor = wav_tensor.to(_demucs_device)
 
         logger.info(
-            "separator: separating %.1fs clip starting at %.1fs with Demucs %s",
-            frames / native_sr, offset_frames / native_sr, MODEL_NAME,
+            "separator: separating %.1fs clip starting at %.1fs with Demucs %s (device=%s)",
+            frames / native_sr, offset_frames / native_sr, MODEL_NAME, _demucs_device,
         )
         from demucs.apply import apply_model
         with torch.no_grad():

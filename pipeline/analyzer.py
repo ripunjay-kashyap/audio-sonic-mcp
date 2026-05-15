@@ -64,15 +64,15 @@ def analyze_audio(wav_path: Path, stems_dir: "Path | None" = None) -> dict[str, 
         y_mono = librosa.resample(y_mono, orig_sr=sr_orig, target_sr=TARGET_SR)
 
     # Try stem-based analysis; fall back to HPSS on any missing stem.
-    # stem_offset aligns the stem read with the SSM chorus window so BPM,
-    # key, and vocal analysis all draw from the same section of the track.
-    stem_offset = chorus_start if chorus_start is not None else 0.0
+    # Stem files are pre-windowed by `pipeline.separator` using the same
+    # `find_ssm_window` call we made above, so they already represent the
+    # 60 s analysis slice — read them from offset 0.
     y_drums = y_bass = y_bass_other = y_vocals = None
     if stems_dir is not None:
-        y_drums = _load_stem(stems_dir, "drums", TARGET_SR, ANALYSIS_DURATION, stem_offset)
-        y_bass = _load_stem(stems_dir, "bass", TARGET_SR, ANALYSIS_DURATION, stem_offset)
-        y_other = _load_stem(stems_dir, "other", TARGET_SR, ANALYSIS_DURATION, stem_offset)
-        y_vocals = _load_stem(stems_dir, "vocals", TARGET_SR, ANALYSIS_DURATION, stem_offset)
+        y_drums  = _load_stem(stems_dir, "drums",  TARGET_SR, ANALYSIS_DURATION, 0.0)
+        y_bass   = _load_stem(stems_dir, "bass",   TARGET_SR, ANALYSIS_DURATION, 0.0)
+        y_other  = _load_stem(stems_dir, "other",  TARGET_SR, ANALYSIS_DURATION, 0.0)
+        y_vocals = _load_stem(stems_dir, "vocals", TARGET_SR, ANALYSIS_DURATION, 0.0)
         if y_bass is not None and y_other is not None:
             y_bass_other = y_bass + y_other
 
@@ -870,15 +870,41 @@ MAJOR_TEMPLATE = np.array(
 MINOR_TEMPLATE = np.array(
     [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17]
 )
+# Phrygian = natural minor with lowered 2 (swap M2 weight with b2 weight in Krumhansl Minor)
+PHRYGIAN_TEMPLATE = np.array(
+    [6.33, 3.52, 2.68, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17]
+)
+
+# Modal modes recognised internally. Output is always mapped to parallel Minor
+# of the same root — these labels never leave _detect_key.
+#
+# Dorian was tried and dropped: a Dorian-root and its relative natural minor
+# share the SAME scale (e.g. A Dorian = E Minor), so chroma alone cannot
+# distinguish them.  Dorian-promotion fires on songs that are genuinely in the
+# relative minor (SHOULDA NEVER's A Dorian win for an E Minor song), with no
+# evidence to defer to absent-char-tone correction.  Phrygian's b2 IS
+# discriminable (its alias's distinguishing tone differs by a semitone), so
+# Phrygian remains.
+_MODAL_MODES = ("Phrygian",)
+# Characteristic scale degree (semitones above root) for each modal mode.
+# Used to gate modal candidates: the distinguishing tone must be genuinely
+# present (z > 0) before a modal interpretation is accepted.
+_MODAL_CHAR_TONE = {"Phrygian": 1}
 
 
 def _score_keys_for_chroma(combined: np.ndarray) -> dict[str, float]:
-    """Returns {key_name: correlation_score} for all 24 keys against a chroma vector."""
+    """Returns {key_name: correlation_score} for all 36 candidates against chroma.
+
+    12 roots × 3 modes (Major, Minor, Phrygian). Phrygian keys are scored
+    internally so the detector can recognise modal songs; callers must remap
+    modal winners to parallel Minor before the key leaves the analyzer.
+    """
     scores: dict[str, float] = {}
     for i, root in enumerate(PITCH_CLASSES):
         rotated = np.roll(combined, -i)
-        scores[f"{root} Major"] = float(np.corrcoef(rotated, MAJOR_TEMPLATE)[0, 1])
-        scores[f"{root} Minor"] = float(np.corrcoef(rotated, MINOR_TEMPLATE)[0, 1])
+        scores[f"{root} Major"]    = float(np.corrcoef(rotated, MAJOR_TEMPLATE)[0, 1])
+        scores[f"{root} Minor"]    = float(np.corrcoef(rotated, MINOR_TEMPLATE)[0, 1])
+        scores[f"{root} Phrygian"] = float(np.corrcoef(rotated, PHRYGIAN_TEMPLATE)[0, 1])
     return scores
 
 
@@ -926,8 +952,11 @@ def _detect_key(
 
     # Accumulate per-key correlation scores across all signals and their windows.
     # Also collect chroma vectors for the characteristic-tone mode tiebreaker below.
+    # per_section_winners holds (best_key, best_score) for each signal individually
+    # — used by the per-section voting step further down.
     all_scores: dict[str, float] = {}
     all_chroma_vecs: list[np.ndarray] = []
+    per_section_winners: list[tuple[str, float]] = []
     for y_harmonic in signals:
         n = y_harmonic.size
         if n >= int(45 * sr):
@@ -947,9 +976,75 @@ def _detect_key(
             all_chroma_vecs.append(chroma_vec)
         for k, v in signal_scores.items():
             all_scores[k] = all_scores.get(k, 0.0) + v
+        section_best = max(signal_scores.items(), key=lambda kv: kv[1])
+        per_section_winners.append(section_best)
 
-    best_key, best_score = max(all_scores.items(), key=lambda kv: kv[1])
+    # Modal pre-filter: drop modal candidates whose characteristic scale degree
+    # is z-absent (≤ 0) in the average chroma.  This keeps Phrygian from
+    # winning on diatonic music by accident — it survives only when its
+    # distinguishing tone (b2) is genuinely present.
+    avg_chroma = np.mean(all_chroma_vecs, axis=0) if all_chroma_vecs else None
+    if avg_chroma is not None:
+        for root in PITCH_CLASSES:
+            root_idx = PITCH_CLASSES.index(root)
+            for mode in _MODAL_MODES:
+                char_idx = (root_idx + _MODAL_CHAR_TONE[mode]) % 12
+                if avg_chroma[char_idx] <= 0.0:
+                    all_scores.pop(f"{root} {mode}", None)
+
     correction_fired = False  # tracks whether any post-hoc rule changed best_key
+    modal_promoted   = False  # set when modal winner is remapped to parallel Minor
+
+    # Split into modal vs diatonic so the two can be compared cleanly.
+    diatonic_scores = {k: v for k, v in all_scores.items() if k.split()[1] not in _MODAL_MODES}
+    modal_scores    = {k: v for k, v in all_scores.items() if k.split()[1] in _MODAL_MODES}
+
+    # Default winner is the diatonic top — keeps the existing Major/Minor flow
+    # intact for songs without strong modal evidence.
+    best_key, best_score = max(diatonic_scores.items(), key=lambda kv: kv[1])
+
+    # Modal promotion: a modal candidate is preferred only when it CLEARLY beats
+    # the same-root Minor (relative margin ≥ MODAL_PROMOTE_RATIO).  Otherwise
+    # the modal score is just template-noise on a diatonic song — POWER's
+    # G Phrygian (11% above G Minor) coincides with C Minor's scale and would
+    # fool downstream logic, while NEW MAGIC WAND's F Phrygian (27% above F
+    # Minor) is genuine modal evidence.  The 1.20 ratio empirically separates
+    # these cases on the test set.  When modal wins, output the parallel Minor
+    # of its root — the schema only exposes Major/Minor labels.
+    MODAL_PROMOTE_RATIO = 1.20
+    if modal_scores:
+        modal_key, modal_score = max(modal_scores.items(), key=lambda kv: kv[1])
+        modal_root = modal_key.split()[0]
+        diatonic_top_root = best_key.split()[0]
+        parallel_minor = f"{modal_root} Minor"
+        minor_score = diatonic_scores.get(parallel_minor, -np.inf)
+        # Same-root gate: Phrygian's relative parent-Major has its 3rd at the
+        # Phrygian root (E Phrygian is mode 3 of C Major).  Without this gate
+        # C# Phrygian would promote on songs genuinely in A Major / E Minor
+        # (SHOULDA NEVER), masking the absent-char-tone correction.  By
+        # requiring modal_root == diatonic_top_root we only promote when modal
+        # evidence is consistent with the diatonic best-fit's tonic.
+        same_root = modal_root == diatonic_top_root
+        if same_root and minor_score > 0 and modal_score >= minor_score * MODAL_PROMOTE_RATIO:
+            logger.info(
+                "_detect_key: modal %s wins (%.3f vs %s=%.3f, ratio=%.2f ≥ %.2f) → output as %s",
+                modal_key, modal_score, parallel_minor, minor_score,
+                modal_score / max(minor_score, 1e-6), MODAL_PROMOTE_RATIO, parallel_minor,
+            )
+            best_key, best_score = parallel_minor, max(minor_score, modal_score)
+            correction_fired = True
+            modal_promoted   = True
+        elif modal_score > best_score:
+            logger.info(
+                "_detect_key: modal %s (%.3f) raw-wins but same_root=%s ratio=%.2f — keeping diatonic %s",
+                modal_key, modal_score, same_root,
+                modal_score / max(minor_score, 1e-6) if minor_score > 0 else 0.0, best_key,
+            )
+
+    # From here on, downstream Major/Minor-only logic (bass-root override,
+    # char-tone flip, 5th-alias, parallel-tie) operates on the diatonic dict
+    # — modal entries are out of play.
+    all_scores = diatonic_scores
 
     # Bass-root bias: bass lines follow the tonic, resolving relative-key ties.
     # Only applies when the bass is anchored on a single pitch (concentration > 1.15).
@@ -1044,7 +1139,7 @@ def _detect_key(
                     best_key, best_score = candidate, c_score
                     correction_fired = True
 
-        elif pk_mode == "Minor":
+        elif pk_mode == "Minor" and not modal_promoted:
             # Check B — 5th-alias distinguishing-tone check
             # When the bass pedals on the 5th degree, the chroma may treat the
             # 5th as the root, producing an alias minor key a P5 above the true
@@ -1052,6 +1147,11 @@ def _detect_key(
             # keys: the alias key contains (root+1) semitone; the detected key
             # contains (root+2) semitone.  If the alias's distinctive note has
             # more energy, prefer the alias (the true key).
+            #
+            # Skipped when modal_promoted: a Phrygian b2 (root+1) looks
+            # identical to the alias-key distinguishing tone, so 5th-alias
+            # would always flip modal-Phrygian winners to their P4 (e.g.
+            # F Phrygian → A# Minor).
             alias_root = (pk_root_idx + 5) % 12
             alias_key = f"{PITCH_CLASSES[alias_root]} Minor"
             alias_score = all_scores.get(alias_key, -np.inf)
@@ -1101,12 +1201,87 @@ def _detect_key(
                 best_key, best_score = tie_key, all_scores[tie_key]
                 correction_fired = True
 
+    # Per-section voting: each harmonic section voted independently above
+    # (per_section_winners).  Voting is a FALLBACK — it only fires when no
+    # other correction has fired.  Otherwise per-section winners (which are
+    # raw, uncorrected) would override valid corrections (5th-alias,
+    # absent-char-tone, modal-promotion) by majority.  Two ways a section
+    # vote overrides the global winner:
+    #
+    #   Rule 1 — consensus: if ≥2 sections agree on a key, prefer that even when
+    #   the summed all_scores winner is different.  Helps when the SSM/chorus
+    #   section dominates the sum but the other sections clearly disagree.
+    #
+    #   Rule 2 — v→i tiebreaker: when the current best_key is X Minor and at
+    #   least one section voted (X-7 semitones) Minor (= true tonic, with X as
+    #   its V), AND that section's internal score is within 10% of the section
+    #   that voted X Minor, override to the lower-root key.  Catches windowing
+    #   failures where the SSM chorus tonicises the v but verse HPSS captures i.
+    # Lead-ratio gate: voting only fires when the diatonic aggregate top-2 gap
+    # is narrow (<20%).  When best_key clearly dominates the aggregate (e.g.
+    # FEIN: D# Minor 0.995 vs A# Minor 0.767, 23% lead), the per-section
+    # winners are likely just emphasising the V/iv chord temporarily — not
+    # signalling a different tonic.
+    _ranked_for_voting = sorted(all_scores.items(), key=lambda kv: kv[1], reverse=True)
+    _lead = (
+        (_ranked_for_voting[0][1] - _ranked_for_voting[1][1]) / max(abs(_ranked_for_voting[0][1]), 1e-6)
+        if len(_ranked_for_voting) >= 2 else 1.0
+    )
+    voting_allowed = _lead < 0.20
+
+    if len(per_section_winners) >= 2 and not correction_fired and voting_allowed:
+        # Normalise modal section winners to parallel Minor
+        norm_section_winners = []
+        for k, s in per_section_winners:
+            root_str, mode = k.split()
+            if mode in _MODAL_MODES:
+                norm_section_winners.append((f"{root_str} Minor", s))
+            else:
+                norm_section_winners.append((k, s))
+
+        # Rule 1: consensus
+        from collections import Counter
+        vote_counts = Counter(k for k, _ in norm_section_winners)
+        consensus_key, count = vote_counts.most_common(1)[0]
+        if count >= 2 and consensus_key != best_key and consensus_key in all_scores:
+            logger.info(
+                "_detect_key: section-consensus %s → %s (%d/%d sections agree)",
+                best_key, consensus_key, count, len(norm_section_winners),
+            )
+            best_key, best_score = consensus_key, all_scores[consensus_key]
+            correction_fired = True
+
+        # Rule 2: predominant→i tiebreaker.  When current best_key is Minor and
+        # at least one section voted a Minor whose root is the v (current+5) or
+        # iv (current+7) of a candidate true tonic, prefer the lower root if
+        # that section's internal score is within 15% of the current's score.
+        # Catches TAKE FIVE (per_section: G# Minor (iv of D#m), D# Phrygian (i)).
+        if best_key.split()[1] == "Minor":
+            cur_root_idx = PITCH_CLASSES.index(best_key.split()[0])
+            scores_for_cur = [s for k, s in norm_section_winners if k == best_key]
+            for delta, label in ((5, "v→i"), (7, "iv→i")):
+                true_root_idx = (cur_root_idx + delta) % 12
+                true_key = f"{PITCH_CLASSES[true_root_idx]} Minor"
+                scores_for_true = [s for k, s in norm_section_winners if k == true_key]
+                if (
+                    scores_for_cur and scores_for_true and true_key in all_scores
+                    and max(scores_for_true) >= max(scores_for_cur) * 0.85
+                ):
+                    logger.info(
+                        "_detect_key: %s vote %s → %s (section scores: cur=%.3f, true=%.3f)",
+                        label, best_key, true_key, max(scores_for_cur), max(scores_for_true),
+                    )
+                    best_key, best_score = true_key, all_scores[true_key]
+                    correction_fired = True
+                    break
+
     if all_chroma_vecs:
         _ranked = sorted(all_scores.items(), key=lambda kv: kv[1], reverse=True)
         _dom_pc = PITCH_CLASSES[int(np.argmax(np.mean(all_chroma_vecs, axis=0)))]
         logger.info(
-            "_detect_key: ranked=%s dom_chroma=%s best=%s",
+            "_detect_key: ranked=%s dom_chroma=%s best=%s per_section=%s",
             [(k, round(v, 4)) for k, v in _ranked[:4]], _dom_pc, best_key,
+            [(k, round(s, 3)) for k, s in per_section_winners],
         )
 
     confidence = round(float(np.clip(best_score, 0.0, 1.0)), 2)

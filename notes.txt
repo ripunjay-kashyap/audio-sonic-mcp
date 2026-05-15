@@ -1,0 +1,7 @@
+We will be using VS Code Remote Tunnels to connect directly to Kaggle's free GPU compute.
+
+ current code detects the GPU for the CLAP vectorizer, but the Demucs separator might
+  default to CPU unless we explicitly tell it to use CUDA. 
+
+  To ensure you get that "20-second" speed, we should make a small update to
+  pipeline/separator.py to move the tensors to the GPU.

@@ -72,7 +72,7 @@ GROUND_TRUTH = [
         "https://www.youtube.com/watch?v=vmDDOFXSgAs",
         174, "D# Minor",   # Dave Brubeck – Take Five (Eb Minor); 5/4 time
         None,
-        "modal jazz; Eb Dorian inflection may not surface as D# Minor via Krumhansl",
+        None,              # fixed: Phrygian template + iv→i per-section voting (G# Minor SSM, D# Phrygian verse → D# Minor)
     ),
     (
         "sig_so_what",
