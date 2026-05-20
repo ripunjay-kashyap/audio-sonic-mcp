@@ -1,14 +1,34 @@
 """
 Stage 2 — Streaming Audio Download
-Uses yt-dlp to pull only the audio stream (no video), saving ~70% bandwidth.
+Pulls only the audio stream (no video) via yt-dlp, saving ~70% bandwidth.
 """
 
 import logging
-import subprocess
-from subprocess import DEVNULL
+import os
 from pathlib import Path
 
+import yt_dlp
+
 logger = logging.getLogger(__name__)
+
+
+class _YtdlpLogger:
+    """Routes yt-dlp output through Python logger — keeps MCP stdio pipe clean."""
+
+    def debug(self, msg):
+        # yt-dlp routes progress lines and verbose internals both through debug();
+        # the "[debug] " prefix marks the internals, which we drop as noise.
+        if not msg.startswith("[debug] "):
+            logger.debug(msg)
+
+    def info(self, msg):
+        logger.info(msg)
+
+    def warning(self, msg):
+        logger.warning(msg)
+
+    def error(self, msg):
+        logger.error(msg)
 
 
 def download_audio(url: str, job_id: str, jobs_root: Path) -> Path:
@@ -26,49 +46,27 @@ def download_audio(url: str, job_id: str, jobs_root: Path) -> Path:
 
     output_template = str(job_dir / "raw_audio.%(ext)s")
 
-    cmd = [
-        "yt-dlp",
-        # Audio-only, best quality available
-        "--format",
-        "bestaudio/best",
-        # Avoid video download entirely
-        "--no-playlist",
-        # Do not embed metadata (faster)
-        "--no-embed-metadata",
-        # Progress to stderr
-        "--newline",
-        "--progress",
-        # Output path
-        "--output",
-        output_template,
-        # No sponsorblock or chapters needed for audio analysis
-        "--no-sponsorblock",
-        # Anti-bot and geo-bypass mitigations
-        "--geo-bypass",
-        "--extractor-args", "youtube:player_client=android",
-    ]
+    ydl_opts = {
+        "format": "bestaudio/best",
+        "outtmpl": output_template,
+        "no_playlist": True,
+        "geo_bypass": True,
+        "logger": _YtdlpLogger(),
+        "noprogress": False,
+        "newline": True,
+    }
 
-    import os
     proxy_url = os.environ.get("YTDLP_PROXY")
     if proxy_url:
-        cmd.extend(["--proxy", proxy_url])
-
-    cmd.append(url)
+        ydl_opts["proxy"] = proxy_url
 
     logger.info("Downloading: %s", url)
-    result = subprocess.run(
-        cmd,
-        stdin=DEVNULL,
-        capture_output=True,
-        text=True,
-        timeout=300,  # 5-minute cap
-    )
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+    except yt_dlp.utils.DownloadError as exc:
+        raise RuntimeError(f"yt-dlp download failed for '{url}': {exc}") from exc
 
-    if result.returncode != 0:
-        stderr = result.stderr.strip()
-        raise RuntimeError(f"yt-dlp download failed for '{url}'.\nstderr: {stderr}")
-
-    # Find the downloaded file (extension varies: webm, m4a, opus, etc.)
     candidates = list(job_dir.glob("raw_audio.*"))
     if not candidates:
         raise FileNotFoundError(

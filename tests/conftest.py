@@ -7,6 +7,7 @@ import numpy as np
 import soundfile as sf
 import pytest
 from pathlib import Path
+from unittest.mock import MagicMock
 
 SR = 44100  # standard sample rate used throughout the pipeline
 DURATION = 4  # seconds — enough for librosa BPM/key/chroma analysis
@@ -46,3 +47,19 @@ def audio_wav(tmp_path) -> Path:
     path = tmp_path / "input.wav"
     sf.write(str(path), stereo, SR)
     return path
+
+
+def make_ydl_mock(meta: dict = None, error: Exception = None) -> MagicMock:
+    """Build a yt_dlp.YoutubeDL context-manager mock for the yt-dlp-backed tests.
+
+    extract_info returns `meta` (or {}); if `error` is given it raises instead.
+    download() is a no-op. Stubs out all network access in ingestion/downloader tests.
+    """
+    mock_ydl = MagicMock()
+    if error is not None:
+        mock_ydl.extract_info.side_effect = error
+    else:
+        mock_ydl.extract_info.return_value = meta or {}
+    mock_ydl.__enter__ = MagicMock(return_value=mock_ydl)
+    mock_ydl.__exit__ = MagicMock(return_value=False)
+    return mock_ydl

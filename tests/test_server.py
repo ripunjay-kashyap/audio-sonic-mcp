@@ -5,7 +5,7 @@ All pipeline stages are mocked — no audio processing, no network calls.
 
 import asyncio
 import json
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -26,7 +26,7 @@ def clear_job_store():
 @pytest.mark.asyncio
 async def test_get_sonic_signature_returns_queued_immediately():
     """Valid URL → returns queued job_id without running the pipeline."""
-    with patch("server._run_pipeline", new=AsyncMock()):
+    with patch("server._run_pipeline", new=MagicMock()):
         result = await get_sonic_signature("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
 
     data = json.loads(result)
@@ -37,7 +37,7 @@ async def test_get_sonic_signature_returns_queued_immediately():
 
 @pytest.mark.asyncio
 async def test_get_sonic_signature_uses_provided_job_id():
-    with patch("server._run_pipeline", new=AsyncMock()):
+    with patch("server._run_pipeline", new=MagicMock()):
         result = await get_sonic_signature(
             "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
             job_id="my_custom_id",
@@ -50,7 +50,7 @@ async def test_get_sonic_signature_uses_provided_job_id():
 @pytest.mark.asyncio
 async def test_get_sonic_signature_stores_queued_status():
     """Submitted job is recorded in JOB_STORE with 'queued' status."""
-    with patch("server._run_pipeline", new=AsyncMock()):
+    with patch("server._run_pipeline", new=MagicMock()):
         await get_sonic_signature(
             "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
             job_id="test_q",
@@ -87,7 +87,7 @@ async def test_invalid_url_not_added_to_job_store():
 
 @pytest.mark.asyncio
 async def test_get_job_status_returns_queued_before_pipeline_runs():
-    with patch("server._run_pipeline", new=AsyncMock()):
+    with patch("server._run_pipeline", new=MagicMock()):
         await get_sonic_signature(
             "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
             job_id="poll_test",
@@ -103,3 +103,44 @@ async def test_get_job_status_unknown_job():
     result = await get_job_status("nonexistent_job")
     data = json.loads(result)
     assert "error" in data
+
+
+# ── non_music_warning ──────────────────────────────────────────────────────────
+
+def test_non_music_warning_present_when_confidence_low():
+    """confidence_score < 0.35 → warning field injected into payload."""
+    payload = {
+        "header": {
+            "job_id": "test",
+            "status": "success",
+            "confidence_score": 0.2,
+        },
+        "sonic_signature": {},
+    }
+    server._maybe_warn_non_music(payload)
+    assert "non_music_warning" in payload
+    assert "Low confidence" in payload["non_music_warning"]
+
+
+def test_non_music_warning_absent_when_confidence_high():
+    """confidence_score >= 0.35 → no warning field in payload."""
+    payload = {
+        "header": {
+            "job_id": "test",
+            "status": "success",
+            "confidence_score": 0.8,
+        },
+        "sonic_signature": {},
+    }
+    server._maybe_warn_non_music(payload)
+    assert "non_music_warning" not in payload
+
+
+def test_non_music_warning_at_exact_threshold():
+    """confidence_score == 0.35 → no warning (boundary: warning is strictly < 0.35)."""
+    payload = {
+        "header": {"job_id": "test", "status": "success", "confidence_score": 0.35},
+        "sonic_signature": {},
+    }
+    server._maybe_warn_non_music(payload)
+    assert "non_music_warning" not in payload

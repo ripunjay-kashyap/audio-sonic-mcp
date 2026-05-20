@@ -29,7 +29,7 @@ dev = [
 ]
 
 [project.scripts]
-audio-stem-mcp = "server:main"
+audio-sonic-mcp = "server:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

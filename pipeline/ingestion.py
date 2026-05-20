@@ -5,11 +5,11 @@ Validates that the URL is a supported source and reachable.
 
 import os
 import re
-import subprocess
 import json
 from pathlib import Path
-from subprocess import DEVNULL
 from urllib.parse import urlparse
+
+import yt_dlp
 
 
 SUPPORTED_HOSTS = {
@@ -48,40 +48,25 @@ def validate_source(url: str) -> dict:
     """
     validate_url_format(url)
 
-    cmd = [
-        "yt-dlp",
-        "--dump-json",
-        "--no-playlist",
-        "--quiet",
-        "--geo-bypass",
-        "--extractor-args", "youtube:player_client=android",
-    ]
-    
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "geo_bypass": True,
+        "socket_timeout": 30,
+    }
+
     proxy_url = os.environ.get("YTDLP_PROXY")
     if proxy_url:
-        cmd.extend(["--proxy", proxy_url])
-        
-    cmd.append(url)
-
-    # Probe metadata without downloading
-    result = subprocess.run(
-        cmd,
-        stdin=DEVNULL,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-
-    if result.returncode != 0:
-        stderr = result.stderr.strip()
-        raise RuntimeError(
-            f"yt-dlp failed to probe '{url}'. Reason: {stderr or 'unknown error'}"
-        )
+        ydl_opts["proxy"] = proxy_url
 
     try:
-        meta = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"Could not parse yt-dlp metadata: {exc}") from exc
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            meta = ydl.extract_info(url, download=False)
+    except yt_dlp.utils.DownloadError as exc:
+        raise RuntimeError(f"yt-dlp failed to probe '{url}': {exc}") from exc
+
+    if meta is None:
+        raise RuntimeError(f"yt-dlp returned no metadata for '{url}'")
 
     duration = meta.get("duration", 0)
     if duration and duration > 3600:

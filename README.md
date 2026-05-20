@@ -36,7 +36,7 @@ The pipeline is modular and idempotent, with built-in checkpointing for fault-to
            v
 +--------------------------------------------------------------------------+
 |  FastMCP Server  (server.py)                                             |
-|  split_audio · get_job_status · list_jobs · check_health                |
+|  get_sonic_signature · get_job_status · list_jobs · check_health        |
 |  asyncio.Lock (one job at a time)  +  in-memory job store               |
 +----------------------------------+---------------------------------------+
                                    |
@@ -66,7 +66,7 @@ The pipeline is modular and idempotent, with built-in checkpointing for fault-to
 
 **Stage 2–3 — Download & Normalization:** Pulls the highest-quality audio-only stream (no video mux), then standardizes to 44.1kHz mono WAV via `FFmpeg`, ensuring consistent tensor shapes for downstream model ingestion.
 
-**Stage 4 — Source Separation (Inference):** Runs Facebook's **Demucs** (Hybrid Transformer architecture, `htdemucs`) to decompose the audio mixture into four isolated stems: `vocals`, `drums`, `bass`, `other`. Computes a proxy SDR (Source-to-Distortion Ratio) as a separation quality metric used downstream in confidence scoring.
+**Stage 4 — Source Separation (Inference):** Runs Facebook's **Demucs** (`mdx_extra` model) to decompose the audio mixture into four isolated stems: `vocals`, `drums`, `bass`, `other`. Computes a proxy SDR (Source-to-Distortion Ratio) as a separation quality metric used downstream in confidence scoring.
 
 **Stage 5 — MIR Feature Extraction:** Uses `librosa` and `madmom` to extract deterministic musical features per stem:
 - BPM via `madmom`'s Recurrent Neural Network (RNN) beat tracker (highly robust against syncopation and octave/half-time errors), with `librosa` as a fallback.
@@ -131,11 +131,6 @@ Demucs and CLAP are computationally heavy. This project can run on a local CPU �
       "genre_hint": "Music"
     }
   },
-  "stems_metadata": {
-    "local_root": "/tmp/audio_stems/sig_a3f9b2c1/stems/",
-    "files": ["vocals.wav", "drums.wav", "bass.wav", "other.wav"],
-    "sdr_ratio": 8.4
-  },
   "sonic_signature": {
     "bpm": 128.05,
     "key": "F# Minor",
@@ -143,11 +138,11 @@ Demucs and CLAP are computationally heavy. This project can run on a local CPU �
     "vibe_vector": [0.012, -0.034, 0.091, "... 512 dims ..."],
     "production_profile": {
       "vocal_presence": "forward",
-      "drum_transient_punch": 0.781,
+      "transient_punch": 0.781,
       "stereo_width": "wide",
       "dominant_freq_peaks_hz": {
-        "bass": [55.0, 110.2, 82.4],
-        "drums": [8372.0, 125.0, 250.1]
+        "harmonic": [55.0, 110.2, 82.4],
+        "percussive": [8372.0, 125.0, 250.1]
       }
     }
   },
@@ -158,6 +153,8 @@ Demucs and CLAP are computationally heavy. This project can run on a local CPU �
 ```
 
 The `confidence_score` is a weighted heuristic: 60% SDR separation quality + 40% feature extraction success, giving downstream consumers a single trust signal without requiring knowledge of the internal pipeline state.
+
+> **Note:** Stem WAV files are deleted automatically after each run to free ~75 MB per job. Set `KEEP_JOB_FILES=1` to retain them on disk.
 
 ---
 
@@ -170,8 +167,8 @@ Best for testing or if you don't mind waiting ~4 minutes per song.
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/ripunjkashyap-a11y/Audio_stem_splt.git
-cd Audio_stem_splt
+git clone https://github.com/ripunjay-kashyap/audio-sonic-mcp.git
+cd audio-sonic-mcp
 
 # 2. Set up virtual environment
 python -m venv .venv
@@ -191,8 +188,8 @@ Best for processing many tracks quickly (20-30 seconds per track) without paying
 2. In the right panel, under **Accelerator**, select **GPU T4 x2**.
 3. Add the following to the first cell to install the project with CUDA acceleration:
 ```python
-!git clone https://github.com/ripunjkashyap-a11y/Audio_stem_splt.git
-%cd Audio_stem_splt
+!git clone https://github.com/ripunjay-kashyap/audio-sonic-mcp.git
+%cd audio-sonic-mcp
 
 !apt-get update && apt-get install -y ffmpeg
 !pip install demucs yt-dlp librosa soundfile madmom
@@ -205,7 +202,7 @@ Best for deploying to a cloud VM (e.g., AWS `g5`, GCP `n1` with T4) or a local m
 
 ```bash
 # Build the container
-docker build -t audio-stem-mcp .
+docker build -t audio-sonic-mcp .
 
 # Create persistent directories for outputs and models
 mkdir -p stems models
@@ -214,23 +211,102 @@ mkdir -p stems models
 docker run -it --rm --gpus all \
   -v $(pwd)/stems:/app/stems \
   -v $(pwd)/models:/app/models \
-  audio-stem-mcp
+  audio-sonic-mcp
 ```
 
 ### Claude Desktop Integration
 
-To use this with Claude Desktop on your local machine, add the following to your `claude_desktop_config.json`:
+#### Step 1 — Open the config file
 
+The easiest way is through Claude Desktop itself:
+
+1. Open Claude Desktop
+2. Click your **profile icon** (bottom-left)
+3. Go to **Settings → Developer**
+4. Click **Edit Config**
+
+This opens `claude_desktop_config.json` in your default text editor.
+
+> **Can't find it manually?**
+> - **Windows (Store app):** `%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\claude_desktop_config.json`
+> - **Windows (direct install):** `%APPDATA%\Claude\claude_desktop_config.json`
+> - **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+
+---
+
+#### Step 2 — Add the server entry
+
+Paste the block below into `claude_desktop_config.json`, replacing the path placeholders with your actual install paths.
+
+**Windows**
 ```json
 {
   "mcpServers": {
-    "audio-stem-mcp": {
+    "audio-sonic-mcp": {
+      "command": "C:\\path\\to\\audio-sonic-mcp\\.venv\\Scripts\\python.exe",
+      "args": [
+        "C:\\path\\to\\audio-sonic-mcp\\server.py"
+      ],
+      "env": {
+        "JOBS_ROOT": "C:\\path\\to\\audio-sonic-mcp\\jobs"
+      }
+    }
+  }
+}
+```
+
+**macOS / Linux**
+```json
+{
+  "mcpServers": {
+    "audio-sonic-mcp": {
+      "command": "/path/to/audio-sonic-mcp/.venv/bin/python",
+      "args": [
+        "/path/to/audio-sonic-mcp/server.py"
+      ],
+      "env": {
+        "JOBS_ROOT": "/path/to/audio-sonic-mcp/jobs"
+      }
+    }
+  }
+}
+```
+
+> **Note:** JSON requires double backslashes `\\` for Windows paths.
+
+---
+
+#### Step 3 — Restart Claude Desktop
+
+Fully quit Claude Desktop (system tray → right-click → **Quit**, or Task Manager on Windows) and reopen it.
+
+> **First launch takes 1–3 minutes.** On the very first run, the server downloads the Demucs model weights (~400 MB) before it starts accepting requests. This is a one-time download — subsequent startups take ~10 seconds. Claude Desktop may show the server as "connecting" during this time; that is normal.
+
+---
+
+#### Step 4 — Verify the connection
+
+Once Claude Desktop reopens, look for the **hammer icon** (🔨) in the chat input bar — that confirms the MCP server is connected.
+
+To run a health check, ask Claude:
+
+> *"Check the health of the audio-sonic-mcp server"*
+
+Then try a real analysis:
+
+> *"Get the sonic signature for [YouTube URL]"*
+
+**Option B: Docker (Requires Option 3 installation)**
+```json
+{
+  "mcpServers": {
+    "audio-sonic-mcp": {
       "command": "docker",
       "args": [
         "run", "-i", "--rm",
-        "-v", "/absolute/path/to/stems:/app/stems",
-        "-v", "/absolute/path/to/models:/app/models",
-        "audio-stem-mcp"
+        "-v", "/absolute/path/to/audio-sonic-mcp/jobs:/app/jobs",
+        "-v", "/absolute/path/to/audio-sonic-mcp/models:/app/models",
+        "audio-sonic-mcp"
       ]
     }
   }
@@ -243,12 +319,10 @@ To use this with Claude Desktop on your local machine, add the following to your
 
 | Tool | Description |
 |------|-------------|
-| `split_audio(url, job_id?, model?)` | Submits a full pipeline job; returns structured JSON payload |
+| `get_sonic_signature(url, job_id?)` | Submits a full pipeline job; returns structured JSON payload |
 | `get_job_status(job_id)` | Polls the status and result of a submitted job |
 | `list_jobs()` | Lists all jobs and their current status |
 | `check_health()` | Verifies FFmpeg, yt-dlp, and Python package availability |
-
-Supported Demucs models: `htdemucs` (default, fastest), `htdemucs_ft` (highest quality), `htdemucs_6s` (6 stems, adds guitar and piano), `mdx_extra` (alternative architecture).
 
 ---
 

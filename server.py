@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -47,10 +48,19 @@ app = FastMCP("audio-sonic-mcp")
 
 # ── Concurrency Control ───────────────────────────────────────────────────────
 # Serializes ML jobs to prevent OOM on constrained hardware
-CONCURRENCY_LOCK = asyncio.Lock()
+CONCURRENCY_LOCK = threading.Lock()
 
 # ── In-memory job store ───────────────────────────────────────────────────────
 JOB_STORE: dict[str, dict] = {}
+
+
+class JobStatus:
+    """Lifecycle states stored under JOB_STORE[job_id]["status"]."""
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    SUCCESS = "success"
+    ERROR = "error"
 
 
 def _cleanup_job_artifacts(job_dir: Path) -> None:
@@ -97,12 +107,17 @@ def _maybe_warn_non_music(payload: dict) -> None:
 # ── Background pipeline ───────────────────────────────────────────────────────
 
 
-async def _run_pipeline(job_id: str, url: str, job_dir: Path) -> None:
-    """Background coroutine: acquires CONCURRENCY_LOCK, runs all pipeline stages,
-    writes final result (success or error) to JOB_STORE."""
+def _run_pipeline(job_id: str, url: str, job_dir: Path, started_at: float) -> None:
+    """Daemon-thread pipeline: acquires CONCURRENCY_LOCK, runs all pipeline stages,
+    writes final result (success or error) to JOB_STORE.
+    All pipeline stages are synchronous — no event loop needed."""
     t_start = time.perf_counter()
     try:
-        async with CONCURRENCY_LOCK:
+        with CONCURRENCY_LOCK:
+            # Mark as running once we hold the lock — distinguishes "actively
+            # processing" from "queued waiting on a prior job's lock" when polling.
+            JOB_STORE[job_id] = {"status": JobStatus.RUNNING, "started_at": started_at}
+
             # Stage 1: Validate + Metadata Cache
             logger.info("[1/5] Validating source …")
             cached_meta = load_metadata(job_dir)
@@ -110,7 +125,7 @@ async def _run_pipeline(job_id: str, url: str, job_dir: Path) -> None:
                 logger.info("Fast-Resume: Loaded metadata from disk for job=%s", job_id)
                 source_info = cached_meta
             else:
-                source_info = await asyncio.to_thread(validate_source, url)
+                source_info = validate_source(url)
                 try:
                     save_metadata(job_dir, source_info)
                     logger.info("Persisted metadata.json for job=%s", job_id)
@@ -127,18 +142,15 @@ async def _run_pipeline(job_id: str, url: str, job_dir: Path) -> None:
             else:
                 # Stage 2: Download
                 logger.info("[2/5] Downloading audio stream …")
-                raw_audio_path = await asyncio.to_thread(
-                    download_audio, url, job_id, JOBS_ROOT
-                )
+                raw_audio_path = download_audio(url, job_id, JOBS_ROOT)
 
                 # Stage 3: Convert
                 logger.info("[3/5] Converting to 44.1kHz WAV …")
-                wav_path = await asyncio.to_thread(convert_to_wav, raw_audio_path)
+                wav_path = convert_to_wav(raw_audio_path)
 
             # Stage 4: Stem Separation
-            # asyncio.to_thread avoids anyio cancellation machinery on long-running stages
             logger.info("[4/5] Separating stems (Demucs mdx_extra) …")
-            stems_dir = await asyncio.to_thread(separate_stems, wav_path)
+            stems_dir = separate_stems(wav_path)
             if stems_dir:
                 logger.info("[4/5] Stems ready at %s", stems_dir)
             else:
@@ -146,7 +158,7 @@ async def _run_pipeline(job_id: str, url: str, job_dir: Path) -> None:
 
             # Stage 5: Analyze + Vectorize
             logger.info("[5/5] Running analysis and vibe vectorization …")
-            features = await asyncio.to_thread(analyze_audio, wav_path, stems_dir)
+            features = analyze_audio(wav_path, stems_dir)
             logger.info(
                 "[5/5] Analysis complete: bpm=%.1f key=%s confidence=%.2f",
                 features["bpm"],
@@ -154,7 +166,7 @@ async def _run_pipeline(job_id: str, url: str, job_dir: Path) -> None:
                 features.get("mode_confidence", 0),
             )
 
-            vibe_vector = await asyncio.to_thread(generate_vibe_vector, wav_path)
+            vibe_vector = generate_vibe_vector(wav_path)
             logger.info("[5/5] Vectorize complete: dim=%d", len(vibe_vector))
 
             elapsed = time.perf_counter() - t_start
@@ -168,18 +180,18 @@ async def _run_pipeline(job_id: str, url: str, job_dir: Path) -> None:
             )
             _maybe_warn_non_music(payload)
 
-            JOB_STORE[job_id] = {"status": "success", "payload": payload}
+            JOB_STORE[job_id] = {"status": JobStatus.SUCCESS, "payload": payload, "started_at": started_at}
             logger.info("✓ _run_pipeline | job=%s elapsed=%.1fs", job_id, elapsed)
             _cleanup_job_artifacts(job_dir)
 
     except BaseException as exc:
         elapsed = time.perf_counter() - t_start
         error_payload = {
-            "header": {"job_id": job_id, "status": "error", "confidence_score": 0.0},
+            "header": {"job_id": job_id, "status": JobStatus.ERROR, "confidence_score": 0.0},
             "error": {"type": type(exc).__name__, "message": str(exc)},
             "telemetry": {"inference_time_sec": round(elapsed, 2)},
         }
-        JOB_STORE[job_id] = {"status": "error", "payload": error_payload}
+        JOB_STORE[job_id] = {"status": JobStatus.ERROR, "payload": error_payload, "started_at": started_at}
         logger.error(
             "✗ _run_pipeline | job=%s elapsed=%.1fs error=%s: %s",
             job_id,
@@ -198,7 +210,7 @@ async def get_sonic_signature(url: str, job_id: str = None) -> str:
     """
     Submits a YouTube URL for sonic analysis and returns immediately.
     The pipeline runs in the background — poll get_job_status(job_id) for results.
-    Typical processing: 20-30s on GPU, 3-5 min on CPU.
+    Typical processing: 20-30s on GPU, ~6-8 min on CPU (Demucs separation dominates).
 
     Args:
         url: YouTube URL of the track to analyze.
@@ -211,7 +223,7 @@ async def get_sonic_signature(url: str, job_id: str = None) -> str:
         validate_url_format(url)
     except ValueError as exc:
         error_payload = {
-            "header": {"job_id": job_id, "status": "error", "confidence_score": 0.0},
+            "header": {"job_id": job_id, "status": JobStatus.ERROR, "confidence_score": 0.0},
             "error": {"type": type(exc).__name__, "message": str(exc)},
             "telemetry": {"inference_time_sec": 0.0},
         }
@@ -219,12 +231,15 @@ async def get_sonic_signature(url: str, job_id: str = None) -> str:
         return json.dumps(error_payload, indent=2)
 
     job_dir = JOBS_ROOT / job_id
-    JOB_STORE[job_id] = {"status": "queued", "started_at": time.time()}
-    asyncio.create_task(_run_pipeline(job_id, url, job_dir))
+    started_at = time.time()
+    JOB_STORE[job_id] = {"status": JobStatus.QUEUED, "started_at": started_at}
+    threading.Thread(
+        target=_run_pipeline, args=(job_id, url, job_dir, started_at), daemon=True
+    ).start()
 
     return json.dumps(
         {
-            "status": "queued",
+            "status": JobStatus.QUEUED,
             "job_id": job_id,
             "message": (
                 f"Job {job_id} queued. "
@@ -278,24 +293,34 @@ async def check_health() -> str:
     results = {"status": "ok", "checks": []}
     all_ok = True
 
-    def _check_cmd(cmd):
+    # FFmpeg is a genuine CLI dependency — converter.py shells out to it.
+    def _check_ffmpeg():
         return subprocess.run(
-            [cmd, "-version" if cmd == "ffmpeg" else "--version"],
+            ["ffmpeg", "-version"],
             stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=10,
         )
 
-    for cmd, name in [("ffmpeg", "FFmpeg"), ("yt-dlp", "yt-dlp")]:
-        try:
-            r = await asyncio.to_thread(_check_cmd, cmd)
-            res = {"name": name, "status": "ok" if r.returncode == 0 else "error"}
-            if r.returncode != 0:
-                all_ok = False
-        except Exception as e:
-            res = {"name": name, "status": "not_found", "error": str(e)}
+    try:
+        r = await asyncio.to_thread(_check_ffmpeg)
+        res = {"name": "FFmpeg", "status": "ok" if r.returncode == 0 else "error"}
+        if r.returncode != 0:
             all_ok = False
-        results["checks"].append(res)
+    except Exception as e:
+        res = {"name": "FFmpeg", "status": "not_found", "error": str(e)}
+        all_ok = False
+    results["checks"].append(res)
+
+    # yt-dlp is used as a Python library (pipeline imports yt_dlp), not via CLI,
+    # so probe it by import — the CLI entry point may be absent/broken yet the
+    # library fully functional.
+    yt_dlp_ok = importlib.util.find_spec("yt_dlp") is not None
+    results["checks"].append(
+        {"name": "yt-dlp", "status": "ok" if yt_dlp_ok else "missing"}
+    )
+    if not yt_dlp_ok:
+        all_ok = False
 
     packages = ["mcp", "librosa", "soundfile", "numpy"]
     for pkg in packages:

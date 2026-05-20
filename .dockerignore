@@ -15,7 +15,7 @@ __pycache__/
 # IDE / specific files
 .vscode/
 .claude/
-Audio_stem_splt.code-workspace
+audio-sonic-mcp.code-workspace
 
 # Audio output and models
 stems/
