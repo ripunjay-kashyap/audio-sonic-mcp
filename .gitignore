@@ -53,8 +53,9 @@ htmlcov/
 *.aac
 *.webm
 
-# Job cache — downloaded audio + stems (large binary, regenerable via smoke_test.py)
-jobs/sig_*/
+# Job cache — all runtime working data (downloaded audio, WAV, stems, metadata).
+# Regenerable; metadata.json can contain local filesystem paths — never commit.
+jobs/
 
 # Dev / diagnostic scripts with machine-specific paths
 verify_batch.py
@@ -73,3 +74,15 @@ CLAUDE.md
 _diag_keys.py
 smoke_test.py
 tools/
+
+# AI-assistant & developer tooling — not part of the public package
+GEMINI.md
+.gemini/
+.agents/
+graphify-out/
+docs/superpowers/
+
+# Scratch notes & editor workspace
+notes.md
+ultimate-test.md
+*.code-workspace

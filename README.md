@@ -227,10 +227,10 @@ The easiest way is through Claude Desktop itself:
 
 This opens `claude_desktop_config.json` in your default text editor.
 
-> **Can't find it manually?**
-> - **Windows (Store app):** `%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\claude_desktop_config.json`
-> - **Windows (direct install):** `%APPDATA%\Claude\claude_desktop_config.json`
+> **Prefer to open it manually?** The file is named `claude_desktop_config.json`. Default locations:
+> - **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
 > - **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+> - **Linux:** `~/.config/Claude/claude_desktop_config.json`
 
 ---
 
