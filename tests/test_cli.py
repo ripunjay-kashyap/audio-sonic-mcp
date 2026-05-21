@@ -185,3 +185,26 @@ class TestGenerateVibeTags:
         assert len(out) <= vectorizer.VIBE_TAG_TOP_N
 
 
+class TestAssembleVibeTags:
+    def _features(self):
+        return {
+            "bpm": 120.0, "key": "C Major", "mode_confidence": 0.7,
+            "vocal_presence_label": "present", "transient_punch": 0.4,
+            "stereo_width_label": "wide", "freq_peaks_hz": {"harmonic": [100.0]},
+        }
+
+    def test_includes_vibe_tags_when_provided(self):
+        from pipeline.assembler import assemble_payload
+        p = assemble_payload("j", self._features(), [0.0] * 512, 1.0, [],
+                             {"title": "t"}, vibe_tags=["dark", "jazz"])
+        assert p["sonic_signature"]["vibe_tags"] == ["dark", "jazz"]
+
+    def test_omits_vibe_tags_when_not_provided(self):
+        from pipeline.assembler import assemble_payload
+        p = assemble_payload("j", self._features(), [0.0] * 512, 1.0, [],
+                             {"title": "t"})
+        assert "vibe_tags" not in p["sonic_signature"]
+        assert p["sonic_signature"]["bpm"] == 120.0  # rest of payload intact
+
+
+

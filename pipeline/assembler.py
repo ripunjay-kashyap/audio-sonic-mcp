@@ -13,6 +13,7 @@ def assemble_payload(
     inference_time: float,
     cpu_samples: list[float],
     source_info: dict,
+    vibe_tags: "list[str] | None" = None,
 ) -> dict:
     """
     Assembles the canonical JSON response payload.
@@ -32,6 +33,26 @@ def assemble_payload(
     if "source_path" in source_info:
         source_metadata["source_path"] = source_info["source_path"]
 
+    sonic_signature = {
+        "bpm": features["bpm"],
+        "bpm_variable": features.get("bpm_variable", False),
+        "bpm_range": features.get("bpm_range"),
+        "key": features["key"],
+        "mode_confidence": features.get("mode_confidence"),
+        "key_ambiguous": features.get("key_ambiguous", False),
+        "key_variable": features.get("key_variable", False),
+        "key_map": features.get("key_map", []),
+        "vibe_vector": vibe_vector,
+        "production_profile": {
+            "vocal_presence": features["vocal_presence_label"],
+            "transient_punch": features["transient_punch"],
+            "stereo_width": features["stereo_width_label"],
+            "dominant_freq_peaks_hz": features.get("freq_peaks_hz", {}),
+        },
+    }
+    if vibe_tags is not None:
+        sonic_signature["vibe_tags"] = vibe_tags
+
     return {
         "header": {
             "job_id": job_id,
@@ -39,23 +60,7 @@ def assemble_payload(
             "confidence_score": confidence,
             "source_metadata": source_metadata,
         },
-        "sonic_signature": {
-            "bpm": features["bpm"],
-            "bpm_variable": features.get("bpm_variable", False),
-            "bpm_range": features.get("bpm_range"),
-            "key": features["key"],
-            "mode_confidence": features.get("mode_confidence"),
-            "key_ambiguous": features.get("key_ambiguous", False),
-            "key_variable": features.get("key_variable", False),
-            "key_map": features.get("key_map", []),
-            "vibe_vector": vibe_vector,
-            "production_profile": {
-                "vocal_presence": features["vocal_presence_label"],
-                "transient_punch": features["transient_punch"],
-                "stereo_width": features["stereo_width_label"],
-                "dominant_freq_peaks_hz": features.get("freq_peaks_hz", {}),
-            },
-        },
+        "sonic_signature": sonic_signature,
         "telemetry": {
             "cpu_usage_avg": f"{cpu_avg:.0f}%" if cpu_samples else "n/a",
             "inference_time_sec": round(inference_time, 2),
