@@ -335,6 +335,9 @@ Run the script from the repository root using the project's virtual environment.
 
 # Keep intermediate job files (converted WAV + separated stems) for inspection
 .venv\Scripts\python.exe analyze_file.py "C:\Music\my_demo.mp3" --keep
+
+# Human-readable digest only (no JSON) — quick read for musicians
+.venv\Scripts\python.exe analyze_file.py "C:\Music\my_demo.mp3" --summary
 ```
 
 ### Arguments
@@ -345,8 +348,12 @@ Run the script from the repository root using the project's virtual environment.
 | `--out` | `-o` | No | Also write the JSON result to this file |
 | `--keep` | `-k` | No | Keep intermediate WAV + stems under `jobs/` (default: deleted on exit) |
 | `--job-id` | `-j` | No | Custom job ID; otherwise auto-generated as `file_<8hex>` |
+| `--summary` | `-s` | No | Print a human-readable digest (KEY, BPM, vibe tags, production profile) instead of the JSON |
+| `--no-vector` | — | No | Print full JSON but omit the 512-float `vibe_vector` array |
 
 **Accepted file types:** `mp3`, `wav`, `flac`, `ogg`, `m4a`, `aac`. Any other extension is rejected before processing.
+
+**Vibe tags:** the JSON includes a `vibe_tags` field — human-readable mood/genre/texture words (e.g. `aggressive · dark · hip-hop`) derived from the CLAP embedding via zero-shot matching. Requires the CLAP extra (`pip install ".[clap]"`); without it the field is `null` and the summary shows `(unavailable)`.
 
 ### Environment Variables
 
