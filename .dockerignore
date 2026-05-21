@@ -27,3 +27,22 @@ tmp*/
 
 # Logs
 *.log
+
+# Runtime job data — can contain local filesystem paths; never bake into the image
+jobs/
+
+# Dev tooling, docs, notes, caches — not needed in the runtime image
+.gemini/
+.agents/
+graphify-out/
+GEMINI.md
+CLAUDE.md
+notes.md
+ultimate-test.md
+docs/
+tests/
+smoke_test.py
+tools/
+_diag_keys.py
+verify_batch.py
+benchmark_*.py

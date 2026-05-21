@@ -12,8 +12,8 @@ ENV PYTHONDONTWRITEBYTECODE=1
 # Set consolidated cache folders for downloaded models (Demucs & CLAP)
 ENV TORCH_HOME=/app/models/torch
 ENV HF_HOME=/app/models/huggingface
-# Set output directory
-ENV STEMS_ROOT=/app/stems
+# Job working directory: downloaded audio, WAV, stems, metadata (mount a volume here)
+ENV JOBS_ROOT=/app/jobs
 
 WORKDIR /app
 
@@ -39,7 +39,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN pip install --no-cache-dir torch torchaudio transformers --index-url https://download.pytorch.org/whl/cpu
 
 # Create mount-point directories and hand ownership to appuser
-RUN mkdir -p /app/stems /app/models/torch /app/models/huggingface && \
+RUN mkdir -p /app/jobs /app/models/torch /app/models/huggingface && \
     chown -R appuser:appuser /app
 
 # Copy server code and fix ownership
