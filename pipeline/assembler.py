@@ -20,18 +20,24 @@ def assemble_payload(
     cpu_avg = _cpu_avg(cpu_samples)
     confidence = _confidence_score(features)
 
+    source_metadata = {
+        "title": source_info.get("title"),
+        "uploader": source_info.get("uploader"),
+        "duration_sec": source_info.get("duration_sec"),
+        "url": source_info.get("webpage_url"),
+        "genre_hint": source_info.get("genre_hint"),
+    }
+    if "source_type" in source_info:
+        source_metadata["source_type"] = source_info["source_type"]
+    if "source_path" in source_info:
+        source_metadata["source_path"] = source_info["source_path"]
+
     return {
         "header": {
             "job_id": job_id,
             "status": "success",
             "confidence_score": confidence,
-            "source_metadata": {
-                "title": source_info.get("title"),
-                "uploader": source_info.get("uploader"),
-                "duration_sec": source_info.get("duration_sec"),
-                "url": source_info.get("webpage_url"),
-                "genre_hint": source_info.get("genre_hint"),
-            },
+            "source_metadata": source_metadata,
         },
         "sonic_signature": {
             "bpm": features["bpm"],

@@ -315,6 +315,61 @@ Then try a real analysis:
 
 ---
 
+## Local File Analysis (CLI)
+
+For human musicians at a terminal, the project provides a standalone CLI script `analyze_file.py` to analyze local audio files (full-song) synchronously without running or configuring the MCP server.
+
+### Usage
+
+Run the script from the repository root using the project's virtual environment. The only required argument is the path to your audio file:
+
+```powershell
+# Basic usage (prints JSON to the terminal)
+.venv\Scripts\python.exe analyze_file.py "C:\Music\my_demo.mp3"
+
+# Save the result to a file (still prints to the terminal too)
+.venv\Scripts\python.exe analyze_file.py "C:\Music\my_demo.mp3" --out "C:\Music\my_demo_result.json"
+
+# Capture ONLY the JSON to a file — progress logs stay on screen (they go to stderr)
+.venv\Scripts\python.exe analyze_file.py "C:\Music\my_demo.mp3" > result.json
+
+# Keep intermediate job files (converted WAV + separated stems) for inspection
+.venv\Scripts\python.exe analyze_file.py "C:\Music\my_demo.mp3" --keep
+```
+
+### Arguments
+
+| Argument | Short | Required | Description |
+|---|---|---|---|
+| `path` | — | **Yes** | Path to the local audio file to analyze (positional) |
+| `--out` | `-o` | No | Also write the JSON result to this file |
+| `--keep` | `-k` | No | Keep intermediate WAV + stems under `jobs/` (default: deleted on exit) |
+| `--job-id` | `-j` | No | Custom job ID; otherwise auto-generated as `file_<8hex>` |
+
+**Accepted file types:** `mp3`, `wav`, `flac`, `ogg`, `m4a`, `aac`. Any other extension is rejected before processing.
+
+### Environment Variables
+
+| Variable | Default | Effect |
+|---|---|---|
+| `FILE_MAX_DURATION_SEC` | `600` (10 min) | Maximum allowed file length; the CLI errors out over the limit (CLI-only — the URL path keeps its 60-min limit) |
+| `KEEP_JOB_FILES` | unset | Equivalent to `--keep` when set to `1`/`true`/`yes` |
+
+```powershell
+# Allow files up to 15 minutes for this run
+$env:FILE_MAX_DURATION_SEC="900"; .venv\Scripts\python.exe analyze_file.py "C:\Music\long_jam.wav"
+```
+
+### Key Differences from the MCP / URL Workflow
+1. **Full-Song Analysis:** Unlike the URL/MCP workflow which scans the first 60 seconds (SSM chorus window), the CLI processes the **entire song**. Demos often have no clear chorus, and full-song analysis avoids structural/key detection fragility.
+2. **Read In-Place:** The script never moves, copies, or alters your original audio file. It generates a temporary `input.wav` and stems inside the `jobs/` directory, which are cleaned up automatically upon exit (unless `--keep` is specified).
+3. **Environment:** FFmpeg must be installed and on your system `PATH`. The script automatically adds `.venv\Scripts` and Gyan FFmpeg paths internally.
+
+### Performance Note
+Full-song separation on CPU is computationally heavy and takes about ~4× the duration of the audio (e.g. a 3-minute song takes about 12 minutes to process). If a CUDA-enabled GPU is available, execution takes under 30 seconds.
+
+---
+
 ## MCP Tools Exposed
 
 | Tool | Description |

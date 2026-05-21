@@ -20,7 +20,7 @@ CLAP_MODEL_ID = "laion/larger_clap_music_and_speech"
 VECTOR_DIM = 512
 
 
-def generate_vibe_vector(wav_path: Path) -> list[float]:
+def generate_vibe_vector(wav_path: Path, full_song: bool = False) -> list[float]:
     """
     Generates a 512-dim vibe vector from the input WAV file.
 
@@ -29,16 +29,16 @@ def generate_vibe_vector(wav_path: Path) -> list[float]:
     2. Fallback: librosa mel-spectrogram embedding (mean-pooled, PCA-reduced)
     """
     try:
-        return _clap_vector(wav_path)
+        return _clap_vector(wav_path, full_song=full_song)
     except Exception as exc:
         logger.warning("CLAP unavailable (%s). Falling back to librosa embedding.", exc)
-        return _librosa_fallback_vector(wav_path)
+        return _librosa_fallback_vector(wav_path, full_song=full_song)
 
 
 # ── CLAP path ─────────────────────────────────────────────────────────────────
 
 
-def _clap_vector(wav_path: Path) -> list[float]:
+def _clap_vector(wav_path: Path, full_song: bool = False) -> list[float]:
     from transformers import ClapModel, ClapProcessor
     import torch
 
@@ -48,7 +48,7 @@ def _clap_vector(wav_path: Path) -> list[float]:
     model = ClapModel.from_pretrained(CLAP_MODEL_ID).to(device)
     model.eval()
 
-    audio = _load_audio(wav_path, sr=48000)
+    audio = _load_audio(wav_path, sr=48000, full_song=full_song)
 
     inputs = processor(audio=[audio], sampling_rate=48000, return_tensors="pt")
     inputs = {k: v.to(device) for k, v in inputs.items()}
@@ -70,7 +70,7 @@ def _clap_vector(wav_path: Path) -> list[float]:
 # ── Librosa fallback ──────────────────────────────────────────────────────────
 
 
-def _librosa_fallback_vector(wav_path: Path) -> list[float]:
+def _librosa_fallback_vector(wav_path: Path, full_song: bool = False) -> list[float]:
     """
     Generates a compact 512-dim representation using:
     - Mel-spectrogram statistics (mean + std across time for 128 bands = 256 dims)
@@ -82,7 +82,7 @@ def _librosa_fallback_vector(wav_path: Path) -> list[float]:
     """
     import librosa
 
-    y = _load_audio(wav_path, sr=22050)
+    y = _load_audio(wav_path, sr=22050, full_song=full_song)
     y = y.astype(np.float32)
 
     features: list[float] = []
@@ -138,7 +138,7 @@ def _librosa_fallback_vector(wav_path: Path) -> list[float]:
 # ── Shared utility ────────────────────────────────────────────────────────────
 
 
-def _load_audio(wav_path: Path, sr: int) -> np.ndarray:
+def _load_audio(wav_path: Path, sr: int, full_song: bool = False) -> np.ndarray:
     """Loads the analysis-window slice of a WAV as a mono float32 array.
     See ``pipeline.window`` for window selection (offset + duration vary
     with track length). Uses soundfile directly to avoid librosa's audioread
@@ -150,9 +150,12 @@ def _load_audio(wav_path: Path, sr: int) -> np.ndarray:
 
     with sf.SoundFile(str(wav_path)) as snd:
         native_sr = snd.samplerate
-        offset_frames, frames_to_read = pick_window(snd.frames, native_sr)
-        snd.seek(offset_frames)
-        raw = snd.read(frames=frames_to_read, dtype="float32", always_2d=True)
+        if full_song:
+            raw = snd.read(dtype="float32", always_2d=True)
+        else:
+            offset_frames, frames_to_read = pick_window(snd.frames, native_sr)
+            snd.seek(offset_frames)
+            raw = snd.read(frames=frames_to_read, dtype="float32", always_2d=True)
 
     # raw: (frames, channels) → mono
     y = librosa.to_mono(raw.T)

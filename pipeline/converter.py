@@ -15,7 +15,7 @@ TARGET_CHANNELS = 2  # stereo
 TARGET_BIT_DEPTH = "s16"  # signed 16-bit PCM
 
 
-def convert_to_wav(raw_audio_path: Path) -> Path:
+def convert_to_wav(raw_audio_path: Path, out_dir: Path | None = None) -> Path:
     """
     Converts the raw downloaded file to a normalized WAV.
     Uses FFmpeg with high-quality resampling (soxr engine).
@@ -25,7 +25,11 @@ def convert_to_wav(raw_audio_path: Path) -> Path:
     if not raw_audio_path.exists():
         raise FileNotFoundError(f"Raw audio not found: {raw_audio_path}")
 
-    wav_path = raw_audio_path.parent / "input.wav"
+    if out_dir is not None:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        wav_path = out_dir / "input.wav"
+    else:
+        wav_path = raw_audio_path.parent / "input.wav"
 
     if wav_path.exists():
         logger.info("WAV already exists, skipping conversion: %s", wav_path)

@@ -15,7 +15,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
-def analyze_audio(wav_path: Path, stems_dir: "Path | None" = None) -> dict[str, Any]:
+def analyze_audio(wav_path: Path, stems_dir: "Path | None" = None, full_song: bool = False) -> dict[str, Any]:
     """
     Runs audio feature extraction on a single WAV file.
 
@@ -38,7 +38,6 @@ def analyze_audio(wav_path: Path, stems_dir: "Path | None" = None) -> dict[str, 
     from pipeline.window import find_ssm_window, pick_window
 
     TARGET_SR = 22050
-    ANALYSIS_DURATION = 60.0  # also used by _load_stem for the cropped stems
 
     # For long tracks, find the most structurally repeated section via SSM
     # (cheap 11 kHz scan, ~2 s). Short/medium tracks use the default 0 s offset.
@@ -46,13 +45,22 @@ def analyze_audio(wav_path: Path, stems_dir: "Path | None" = None) -> dict[str, 
         sr_orig = snd.samplerate
         total_sec = snd.frames / sr_orig
 
-    chorus_start = find_ssm_window(wav_path, total_sec) if total_sec >= 75.0 else None
+    if full_song:
+        chorus_start = None
+        ANALYSIS_DURATION = total_sec
+    else:
+        chorus_start = find_ssm_window(wav_path, total_sec) if total_sec >= 75.0 else None
+        ANALYSIS_DURATION = 60.0
 
     # Read directly via soundfile to avoid librosa's audioread fallback,
     # which spawns FFmpeg with inherited stdin and deadlocks under MCP.
     with sf.SoundFile(str(wav_path)) as snd:
         sr_orig = snd.samplerate
-        offset_frames, frames_to_read = pick_window(snd.frames, sr_orig, chorus_start)
+        if full_song:
+            offset_frames = 0
+            frames_to_read = snd.frames
+        else:
+            offset_frames, frames_to_read = pick_window(snd.frames, sr_orig, chorus_start)
         snd.seek(offset_frames)
         raw = snd.read(frames=frames_to_read, dtype="float32", always_2d=True)
     y_stereo = raw.T
@@ -99,18 +107,19 @@ def analyze_audio(wav_path: Path, stems_dir: "Path | None" = None) -> dict[str, 
     # across the full song, not just the chorus.
     # Without SSM: keep the original two fixed passes at 90s and 150s.
     harmonics = [y_harmonic]
-    if chorus_start is None:
-        y_harm_b = _load_hpss_harmonic(wav_path, 90, 60, TARGET_SR)
-        y_harm_c = _load_hpss_harmonic(wav_path, 150, 60, TARGET_SR)
-        if y_harm_b is not None:
-            harmonics.append(y_harm_b)
-        if y_harm_c is not None:
-            harmonics.append(y_harm_c)
-    else:
-        verse_offset = max(30.0, chorus_start - 45.0)
-        y_harm_verse = _load_hpss_harmonic(wav_path, verse_offset, 60, TARGET_SR)
-        if y_harm_verse is not None:
-            harmonics.append(y_harm_verse)
+    if not full_song:
+        if chorus_start is None:
+            y_harm_b = _load_hpss_harmonic(wav_path, 90, 60, TARGET_SR)
+            y_harm_c = _load_hpss_harmonic(wav_path, 150, 60, TARGET_SR)
+            if y_harm_b is not None:
+                harmonics.append(y_harm_b)
+            if y_harm_c is not None:
+                harmonics.append(y_harm_c)
+        else:
+            verse_offset = max(30.0, chorus_start - 45.0)
+            y_harm_verse = _load_hpss_harmonic(wav_path, verse_offset, 60, TARGET_SR)
+            if y_harm_verse is not None:
+                harmonics.append(y_harm_verse)
 
     key_str, mode_confidence, key_ambiguous = _detect_key(harmonics, TARGET_SR, y_bass=y_bass)
     key_variable, key_map = (
@@ -1053,6 +1062,13 @@ def _detect_key(
     # which isn't the tonic. The 1.15 threshold cleanly separates anchored
     # bass (1.16+) from melodic bass (≤ 1.08) in the validated test set.
     BASS_CONCENTRATION_MIN = 1.15
+    # The override only breaks a genuine relative/dominant tie, so the bass-root
+    # candidate must score within 15% of the winner.  Bound empirically from the
+    # only two firings in the fixture set: it preserves the load-bearing
+    # million_dollar flip (C# Major→F# Minor, ratio 0.90) while rejecting the
+    # harmful so_what flip (D Minor→A# Major, ratio 0.79) that the looser 0.75
+    # gate let through on So What's modal ♭7-heavy bass.
+    BASS_OVERRIDE_SCORE_RATIO = 0.85
     if y_bass is not None and y_bass.size > 1:
         bass_chroma_mean = librosa.feature.chroma_cens(
             y=y_bass, sr=sr, hop_length=2048
@@ -1066,7 +1082,7 @@ def _detect_key(
             for mode in ("Minor", "Major"):
                 candidate = f"{bass_root} {mode}"
                 c_score = all_scores.get(candidate, -np.inf)
-                if c_score >= best_score * 0.75:  # within 25% of best
+                if c_score >= best_score * BASS_OVERRIDE_SCORE_RATIO:
                     logger.info(
                         "_detect_key: bass-root override %s → %s (%.3f vs %.3f, conc=%.2f)",
                         best_key, candidate, c_score, best_score, bass_concentration,

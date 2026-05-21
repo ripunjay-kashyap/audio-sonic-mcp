@@ -6,6 +6,7 @@ Validates that the URL is a supported source and reachable.
 import os
 import re
 import json
+import subprocess
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -19,6 +20,8 @@ SUPPORTED_HOSTS = {
     "music.youtube.com",
     "m.youtube.com",
 }
+
+SUPPORTED_AUDIO_EXTS = {"mp3", "wav", "flac", "ogg", "m4a", "aac"}
 
 
 def validate_url_format(url: str) -> None:
@@ -86,6 +89,54 @@ def validate_source(url: str) -> dict:
         "webpage_url": meta.get("webpage_url", url),
         "extractor": meta.get("extractor", "unknown"),
         "genre_hint": genre_hint,
+    }
+
+
+def validate_file_path(path: str) -> None:
+    p = Path(path)
+    if not p.exists():
+        raise ValueError(f"File does not exist: {path}")
+    if not p.is_file():
+        raise ValueError(f"Not a regular file: {path}")
+    
+    ext = p.suffix.lower().lstrip(".")
+    if ext not in SUPPORTED_AUDIO_EXTS:
+        raise ValueError(f"Unsupported audio extension: {ext}")
+
+
+def validate_file_source(path: str) -> dict:
+    validate_file_path(path)
+    try:
+        max_dur = float(os.environ.get("FILE_MAX_DURATION_SEC", "600"))
+    except ValueError:
+        max_dur = 600.0
+
+    cmd = [
+        "ffprobe",
+        "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        str(Path(path).resolve())
+    ]
+    try:
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+        duration = float(res.stdout.strip())
+    except Exception as exc:
+        raise RuntimeError(f"Failed to probe file duration via ffprobe: {exc}") from exc
+
+    if duration > max_dur:
+        raise ValueError(f"Duration {duration}s exceeds {max_dur}s limit.")
+
+    return {
+        "title": Path(path).stem,
+        "uploader": "local file",
+        "duration_sec": duration,
+        "thumbnail": None,
+        "webpage_url": None,
+        "source_path": str(Path(path).resolve()),
+        "extractor": "local",
+        "source_type": "file",
+        "genre_hint": None,
     }
 
 

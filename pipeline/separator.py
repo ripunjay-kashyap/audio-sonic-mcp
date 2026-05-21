@@ -40,7 +40,7 @@ def load_demucs_model():
     logger.info("separator: Demucs %s model loaded (device=%s)", MODEL_NAME, _demucs_device)
 
 
-def separate_stems(wav_path: Path) -> "Path | None":
+def separate_stems(wav_path: Path, full_song: bool = False) -> "Path | None":
     """
     Separates the analysis window of wav_path (see pipeline.window) into 4 stems
     using the in-process Demucs model. Returns the stem directory, or None on failure.
@@ -70,14 +70,19 @@ def separate_stems(wav_path: Path) -> "Path | None":
         # in the SSM chorus window — not the fixed 30 s default.  Both stages
         # are deterministic for the same WAV, so calling find_ssm_window
         # independently here is safe.
-        from pipeline.window import pick_window, find_ssm_window
         with sf.SoundFile(str(wav_path)) as snd:
             native_sr = snd.samplerate
-            total_sec = snd.frames / native_sr
-            chorus_start = find_ssm_window(wav_path, total_sec) if total_sec >= 75.0 else None
-            offset_frames, frames = pick_window(snd.frames, native_sr, chorus_start)
-            snd.seek(offset_frames)
-            data = snd.read(frames=frames, dtype="float32", always_2d=True)
+            if full_song:
+                data = snd.read(dtype="float32", always_2d=True)
+                frames = len(data)
+                offset_frames = 0
+            else:
+                from pipeline.window import pick_window, find_ssm_window
+                total_sec = snd.frames / native_sr
+                chorus_start = find_ssm_window(wav_path, total_sec) if total_sec >= 75.0 else None
+                offset_frames, frames = pick_window(snd.frames, native_sr, chorus_start)
+                snd.seek(offset_frames)
+                data = snd.read(frames=frames, dtype="float32", always_2d=True)
 
         # data: [frames, channels] → [channels, frames]
         wav_np = data.T
