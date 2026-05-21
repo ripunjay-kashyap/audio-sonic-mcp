@@ -251,5 +251,33 @@ class TestPrintSummary:
         assert "unavailable" in out
 
 
+class TestCLIFlags:
+    def _run(self, wav, tmp_path, *extra, out=None):
+        cli = Path(__file__).parent.parent / "analyze_file.py"
+        cmd = [sys.executable, str(cli), str(wav), *extra]
+        if out:
+            cmd += ["--out", str(out)]
+        env = os.environ.copy()
+        env.pop("KEEP_JOB_FILES", None)
+        return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True, env=env)
 
+    def test_summary_prints_digest_not_json(self, synthetic_stereo_wav, tmp_path):
+        out_json = tmp_path / "r.json"
+        res = self._run(synthetic_stereo_wav, tmp_path, "--summary",
+                        "--job-id", "test_cli_sum", out=out_json)
+        assert res.returncode == 0, res.stderr
+        assert "SONIC SIGNATURE" in res.stdout
+        assert "BPM" in res.stdout
+        assert '"vibe_vector"' not in res.stdout  # no JSON / no big array
+        # --out still has the COMPLETE JSON including the 512-vector
+        data = json.loads(out_json.read_text(encoding="utf-8"))
+        assert len(data["sonic_signature"]["vibe_vector"]) == 512
 
+    def test_no_vector_strips_array_from_json(self, synthetic_stereo_wav, tmp_path):
+        res = self._run(synthetic_stereo_wav, tmp_path, "--no-vector",
+                        "--job-id", "test_cli_nv")
+        assert res.returncode == 0, res.stderr
+        parsed = json.loads(res.stdout)
+        assert "vibe_vector" not in parsed["sonic_signature"]
+        assert "bpm" in parsed["sonic_signature"]

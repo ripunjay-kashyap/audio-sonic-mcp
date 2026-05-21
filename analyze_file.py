@@ -36,7 +36,7 @@ from pipeline.ingestion import validate_file_path, validate_file_source, save_me
 from pipeline.converter import convert_to_wav
 from pipeline.separator import load_demucs_model, separate_stems
 from pipeline.analyzer import analyze_audio
-from pipeline.vectorizer import generate_vibe_vector
+from pipeline.vectorizer import generate_vibe_vector, generate_vibe_tags
 from pipeline.assembler import assemble_payload
 
 def _cleanup_job_artifacts(job_dir: Path, keep_job_files: bool = False) -> None:
@@ -79,6 +79,16 @@ def _punch_label(v: float) -> str:
 
 def _print_summary(payload: dict) -> None:
     """Print a compact, musician-friendly digest (no JSON, no 512-float vector)."""
+    def _safe_print(text: str) -> None:
+        try:
+            print(text)
+        except UnicodeEncodeError:
+            t = text.replace("\U0001F3B5", "").replace("—", "-").replace("·", ".").replace("–", "-")
+            try:
+                print(t)
+            except UnicodeEncodeError:
+                print(t.encode("ascii", errors="replace").decode("ascii"))
+
     sm = payload["header"]["source_metadata"]
     ss = payload["sonic_signature"]
     pp = ss["production_profile"]
@@ -113,16 +123,16 @@ def _print_summary(payload: dict) -> None:
     overall = round((payload["header"].get("confidence_score") or 0) * 100)
     elapsed = _fmt_mmss(payload.get("telemetry", {}).get("inference_time_sec") or 0)
 
-    print(f"\n\U0001F3B5 SONIC SIGNATURE — {title}  ({dur})\n")
-    print(f"  TEMPO    {tempo}")
-    print(f"  KEY      {key_line}")
-    print(f"  VIBE     {vibe}\n")
-    print("  PRODUCTION")
-    print(f"    Vocals     {pp.get('vocal_presence', 'n/a')}")
-    print(f"    Punch      {punch_str}")
-    print(f"    Stereo     {pp.get('stereo_width', 'n/a')}")
-    print(f"    Low end    {low_end}\n")
-    print(f"  Overall confidence: {overall}%   ·   analyzed in {elapsed}")
+    _safe_print(f"\n\U0001F3B5 SONIC SIGNATURE — {title}  ({dur})\n")
+    _safe_print(f"  TEMPO    {tempo}")
+    _safe_print(f"  KEY      {key_line}")
+    _safe_print(f"  VIBE     {vibe}\n")
+    _safe_print("  PRODUCTION")
+    _safe_print(f"    Vocals     {pp.get('vocal_presence', 'n/a')}")
+    _safe_print(f"    Punch      {punch_str}")
+    _safe_print(f"    Stereo     {pp.get('stereo_width', 'n/a')}")
+    _safe_print(f"    Low end    {low_end}\n")
+    _safe_print(f"  Overall confidence: {overall}%   ·   analyzed in {elapsed}")
 
 
 def main():
@@ -133,6 +143,10 @@ def main():
     parser.add_argument("--out", "-o", help="Optional path to write the output JSON result.")
     parser.add_argument("--keep", "-k", action="store_true", help="Keep intermediate files in job directory.")
     parser.add_argument("--job-id", "-j", help="Custom Job ID for the run.")
+    parser.add_argument("--summary", "-s", action="store_true",
+                        help="Print a human-readable digest instead of JSON.")
+    parser.add_argument("--no-vector", dest="no_vector", action="store_true",
+                        help="Print full JSON but omit the 512-float vibe_vector array.")
     
     args = parser.parse_args()
 
@@ -190,6 +204,9 @@ def main():
         logger.info("Generating vibe vector (full-song)...")
         vibe_vector = generate_vibe_vector(wav_path, full_song=True)
 
+        logger.info("Generating vibe tags (CLAP zero-shot)...")
+        vibe_tags = generate_vibe_tags(wav_path, full_song=True)
+
         # 7. Assemble canonical payload
         elapsed = time.time() - start_time
         payload = assemble_payload(
@@ -198,18 +215,31 @@ def main():
             vibe_vector=vibe_vector,
             inference_time=elapsed,
             cpu_samples=[],
-            source_info=source_info
+            source_info=source_info,
+            vibe_tags=vibe_tags,
         )
 
-        # 8. Print JSON payload to stdout
-        payload_str = json.dumps(payload, indent=2)
-        print(payload_str)
+        # 8. Output: --summary prints the digest; --no-vector strips the array;
+        #    default prints full JSON. --out ALWAYS writes the complete payload.
+        full_json = json.dumps(payload, indent=2)
+        if args.summary:
+            _print_summary(payload)
+        elif args.no_vector:
+            trimmed = {
+                **payload,
+                "sonic_signature": {
+                    k: v for k, v in payload["sonic_signature"].items()
+                    if k != "vibe_vector"
+                },
+            }
+            print(json.dumps(trimmed, indent=2))
+        else:
+            print(full_json)
 
-        # Write to --out if requested
         if args.out:
             out_path = Path(args.out)
             out_path.parent.mkdir(parents=True, exist_ok=True)
-            out_path.write_text(payload_str, encoding="utf-8")
+            out_path.write_text(full_json, encoding="utf-8")
             logger.info("Result written to %s", out_path)
 
         logger.info("Analysis completed successfully in %.2fs.", elapsed)
