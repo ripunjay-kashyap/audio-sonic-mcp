@@ -1,252 +1,161 @@
-# Audio Stem Splitter & Analyzer — MCP Server
+# 🎵 Audio Sonic MCP
 
-A local demonstration of an LLM-callable machine learning pipeline for audio source separation and Music Information Retrieval (MIR). Built as a Model Context Protocol (MCP) server, it makes state-of-the-art deep learning models programmatically accessible to AI agents and LLM orchestration frameworks.
+[![Tests](https://github.com/ripunjay-kashyap/audio-sonic-mcp/actions/workflows/test.yml/badge.svg)](https://github.com/ripunjay-kashyap/audio-sonic-mcp/actions/workflows/test.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
+[![MCP](https://img.shields.io/badge/MCP-server-8A2BE2.svg)](https://modelcontextprotocol.io/)
 
----
+**Turn any song into a structured "sonic signature" — extracting tempo, musical key, a 512-dimension CLAP vibe embedding, human-readable vibe tags, and a production profile — from a single local call.**
 
-## Project Status
+Audio Sonic MCP runs entirely on your local machine (requiring no API keys, external servers, or cloud dependencies) and exposes two premium access points to the same underlying high-fidelity audio analysis engine:
 
-This is a custom-mcp project running on consumer-grade hardware, not a hosted service.
-
-**Hardware constraint:** Demucs and CLAP are computationally heavy. On a modern consumer CPU, a 5-minute track takes approximately 4 minutes end-to-end. However, the codebase is designed to scale dynamically: when deployed on a machine with an Nvidia GPU and CUDA configured (like a free Kaggle T4 notebook), the exact same pipeline completes in 20–30 seconds.
-
-**What this project demonstrates:** ML pipeline architecture, integration of multiple deep learning models (Demucs, CLAP), async system design for high-latency inference workloads, and MCP server implementation. The bottleneck is hardware, not software design — the pipeline seamlessly leverages GPU acceleration when available.
-
----
-
-## Problem Statement
-
-Extracting high-quality isolated audio stems and semantic metadata from raw web audio is traditionally a manual, brittle, multi-tool process. ML workflows, automated music production, and audio dataset curation all require clean, structured, programmatic access to these features.
-
-Compounding this is the operational challenge of deploying deep learning inference pipelines: managing conflicting system-level dependencies (CUDA, FFmpeg, tensor runtimes) in reproducible environments, and handling the latency characteristics of large model inference without blocking orchestrating agents.
-
-This project addresses both by wrapping a 6-stage AI audio processing pipeline in a robust MCP server designed for asynchronous, high-latency inference workloads.
+| | Tailored For | Core Interface & Mechanics |
+|---|---|---|
+| 🤖 **MCP Server** | LLMs, AI agents, & IDEs (Claude, Cursor, Windsurf, Cline) | Asynchronous, fire-and-forget analysis of YouTube URLs. Avoids blocking client LLMs during heavy audio processing. |
+| 🎚️ **Local CLI** | Musicians, sound producers, & audio engineers | Deep command-line tool targeting local files for full-song multi-window analysis and high-fidelity output. |
 
 ---
 
-## Architecture
+## 🎹 Quick Taste: What You Get
 
-The pipeline is modular and idempotent, with built-in checkpointing for fault-tolerant execution across long-running batch jobs.
-
-
+### 1. Musician-Friendly CLI Summary (`--summary` mode)
 ```text
-  LLM Agent / Claude Desktop
-           |
-           |  MCP (stdio)
-           v
-+--------------------------------------------------------------------------+
-|  FastMCP Server  (server.py)                                             |
-|  get_sonic_signature · get_job_status · list_jobs · check_health        |
-|  asyncio.Lock (one job at a time)  +  in-memory job store               |
-+----------------------------------+---------------------------------------+
-                                   |
-                                   v
-+--------------------------------------------------------------------------+
-|  6-Stage Inference Pipeline                                              |
-|                                                                          |
-|  Stage 1 — Ingest      yt-dlp probe         -->  metadata.json          |
-|  Stage 2 — Download    yt-dlp audio stream  -->  raw audio file         |
-|  Stage 3 — Convert     FFmpeg               -->  44.1 kHz WAV           |
-|  Stage 4 — Separate    Demucs (htdemucs)    -->  4 stem WAVs            |
-|  Stage 5 — Analyze     librosa MIR          -->  BPM, key, peaks        |
-|  Stage 6 — Embed       CLAP (laion)         -->  512-dim vector         |
-+----------------------------------+---------------------------------------+
-                                   |
-                                   v
-+--------------------------------------------------------------------------+
-|  JSON Payload                                                            |
-|  header:           job_id, status, confidence_score, source_meta        |
-|  stems_metadata:   file paths, SDR quality metric                       |
-|  sonic_signature:  BPM, key, vibe_vector, production_profile            |
-|  telemetry:        inference_time_sec                                    |
-+--------------------------------------------------------------------------+
+🎵 SONIC SIGNATURE — my_demo.mp3  (3:24)
+
+  TEMPO    153.8 BPM  (steady)
+  KEY      G Major  ·  shifts to G Phrygian @0:30   (confidence 74%)
+  VIBE     aggressive · dark · driving · hip-hop · gritty
+
+  PRODUCTION
+     Vocals     forward
+     Punch      0.62  (moderate)
+     Stereo     wide
+     Low end    ~55 Hz dominant
+
+  Overall confidence: 88%   ·   analyzed in 0:28 (GPU-accelerated)
 ```
 
-**Stage 1 — Ingestion:** URL validation and metadata probing via `yt-dlp`. Enforces a 60-minute duration limit and persists source metadata to disk atomically (tmp-rename pattern) to avoid re-probing on resume.
-
-**Stage 2–3 — Download & Normalization:** Pulls the highest-quality audio-only stream (no video mux), then standardizes to 44.1kHz mono WAV via `FFmpeg`, ensuring consistent tensor shapes for downstream model ingestion.
-
-**Stage 4 — Source Separation (Inference):** Runs Facebook's **Demucs** (`mdx_extra` model) to decompose the audio mixture into four isolated stems: `vocals`, `drums`, `bass`, `other`. Computes a proxy SDR (Source-to-Distortion Ratio) as a separation quality metric used downstream in confidence scoring.
-
-**Stage 5 — MIR Feature Extraction:** Uses `librosa` and `madmom` to extract deterministic musical features per stem:
-- BPM via `madmom`'s Recurrent Neural Network (RNN) beat tracker (highly robust against syncopation and octave/half-time errors), with `librosa` as a fallback.
-- Musical key via weighted chroma fusion (60% bass / 40% harmonic content), with HPSS pre-filtering to remove percussive leakage before CQT chroma extraction.
-- Transient punch from onset strength envelope (97th-percentile peak-to-mean ratio)
-- Dominant frequency peaks per stem (20Hz–16kHz masked FFT)
-- Stereo width via L/R channel correlation
-- Vocal presence via RMS ratio of vocals-to-mix
-
-**Stage 6 — Semantic Embedding:** Passes the stem mix through **CLAP** (Contrastive Language-Audio Pretraining, `laion/larger_clap_music_and_speech`) to generate a 512-dimensional vector embedding. CLAP maps audio into the same latent space as text, enabling cross-modal similarity search ("find tracks that sound like this") without text labels. Falls back gracefully to a hand-engineered 512-dim librosa composite (mel-spectrogram, MFCC, chroma, spectral statistics, Tonnetz) if CLAP is unavailable, maintaining a consistent output schema for downstream consumers.
-
----
-
-## System Design: Handling Inference Latency
-
-### The Constraint
-
-Demucs and CLAP are computationally heavy. This project can run on a local CPU — where processing a 5-minute track takes approximately 4 minutes end-to-end. However, when run on a GPU (e.g., Kaggle T4), it completes in 20-30 seconds. Even at 20 seconds, standard synchronous request-response patterns are risky for orchestration agents, which is why an async job architecture is used.
-
-### The Solutions
-
-**Asynchronous Job Orchestration:** The MCP server accepts a job submission and returns a `job_id` immediately, decoupling the orchestrating LLM's context window from the inference runtime. A `get_job_status` endpoint allows polling asynchronously.
-
-**Idempotent Pipeline with Checkpointing:** Intermediate artifacts (downloaded audio, converted WAV, separated stem files) are persisted to a per-job directory. If a job is interrupted (e.g., OOM during model inference), the pipeline detects existing artifacts and resumes from the last successful stage rather than re-executing expensive upstream work.
-
-**Concurrency Serialization:** A single `asyncio.Lock` serializes all Demucs/CLAP jobs. This prevents RAM exhaustion from overlapping inference runs on constrained hardware, trading throughput for stability — the correct trade-off for a single-node deployment.
-
-**Thread Isolation for ML Workloads:** Long-running synchronous ML stages (librosa, CLAP) are dispatched via `asyncio.to_thread()` rather than `anyio.to_thread.run_sync()`. This avoids anyio's task cancellation machinery interrupting mid-flight tensor operations.
-
----
-
-## Technical Stack
-
-**Machine Learning and AI:**
-- PyTorch and Hugging Face Transformers for model loading and tensor operations
-- Demucs (Meta AI) — Hybrid Spectrogram/Waveform Transformer for music source separation
-- LAION CLAP — contrastive audio/language model for multi-modal semantic embeddings
-
-**Audio Processing and MIR:**
-- librosa — algorithmic feature extraction (BPM, key, spectral analysis)
-- FFmpeg — media normalization and stream conversion
-
-**Infrastructure and MLOps:**
-- FastMCP — exposes the pipeline as a standardized MCP tool server for LLM agents
-- Docker/Podman — containerization for reproducible deployment of GPU drivers (CUDA/ROCm) and system dependencies
-- anyio — async I/O abstraction layer for the MCP runtime
-
----
-
-## Output Schema
-
+### 2. Comprehensive JSON (Returned by MCP and CLI by default)
 ```json
 {
   "header": {
     "job_id": "sig_a3f9b2c1",
     "status": "success",
-    "confidence_score": 0.91,
+    "confidence_score": 0.88,
     "source_metadata": {
-      "title": "Track Name",
-      "uploader": "Artist",
-      "duration_sec": 214,
-      "genre_hint": "Music"
+      "title": "Acoustic Vibe Demo",
+      "duration_sec": 204,
+      "source_type": "file"
     }
   },
   "sonic_signature": {
-    "bpm": 128.05,
-    "key": "F# Minor",
+    "bpm": 153.8,
+    "bpm_variable": false,
+    "key": "G Major",
+    "key_variable": true,
+    "key_map": [
+      { "start_sec": 0.0,  "end_sec": 30.0, "key": "G Major" },
+      { "start_sec": 30.0, "end_sec": 90.0, "key": "G Phrygian" }
+    ],
     "mode_confidence": 0.74,
-    "vibe_vector": [0.012, -0.034, 0.091, "... 512 dims ..."],
+    "vibe_vector": [0.012, -0.034, "... 512 float dimensions ..."],
+    "vibe_tags": ["aggressive", "dark", "driving", "hip-hop", "gritty"],
     "production_profile": {
       "vocal_presence": "forward",
-      "transient_punch": 0.781,
+      "transient_punch": 0.62,
       "stereo_width": "wide",
       "dominant_freq_peaks_hz": {
-        "harmonic": [55.0, 110.2, 82.4],
-        "percussive": [8372.0, 125.0, 250.1]
+        "harmonic": [55.0, 110.2],
+        "percussive": [125.0, 250.1]
       }
     }
   },
   "telemetry": {
-    "inference_time_sec": 47.3
+    "inference_time_sec": 28.0
   }
 }
 ```
 
-The `confidence_score` is a weighted heuristic: 60% SDR separation quality + 40% feature extraction success, giving downstream consumers a single trust signal without requiring knowledge of the internal pipeline state.
+---
 
-> **Note:** Stem WAV files are deleted automatically after each run to free ~75 MB per job. Set `KEEP_JOB_FILES=1` to retain them on disk.
+## ⚡ Key Features
+
+* 🥁 **Tempo & Beat Tracking** — Full BPM computation with variable-tempo drift detection and transient windowing.
+* 🎹 **Key & Harmonic Mapping** — Computes structural musical key + mode, generating a detailed `key_map` tracking section-by-section modulations.
+* 🌈 **Vibe & Style Embeddings** — Compiles a 512-dimensional CLAP embedding and human-readable style tags (covering energy, texture, mood, and genre) using zero-shot music vocab classification.
+* 🎚️ **Production Analytics** — Measures vocal spatial presence, transient punch coefficients, stereo width, and dominant frequency peaks.
+* 🤖 **MCP-Native System** — Fully exposes 4 standardized Model Context Protocol tools for instant integration into AI tools.
+* 🪶 **Robust Graceful Degradation** — Automatically utilizes a CUDA GPU if present and falls back to CPU; gracefully degrades to HPSS and standard librosa feature arrays if heavy deep learning packages (`[clap]`) are omitted.
+* 🔒 **100% Offline & Private** — All conversion, separation, and inference occur locally.
 
 ---
 
-## Quick Start
+## 📦 Installation & Setup
 
-You can run this MCP server in three different ways depending on your hardware availability.
+### System Prerequisites
+Ensure you have **Python 3.10+** and **FFmpeg** installed and accessible on your system `PATH`.
 
-### Option 1: Local CPU (Standard Python)
-Best for testing or if you don't mind waiting ~4 minutes per song.
-
-```bash
-# 1. Clone the repository
-git clone https://github.com/ripunjay-kashyap/audio-sonic-mcp.git
-cd audio-sonic-mcp
-
-# 2. Set up virtual environment
-python -m venv .venv
-source .venv/bin/activate      # Windows: .venv\Scripts\activate
-
-# 3. Install requirements
-pip install -r requirements.txt
-
-# 4. Optional: Install CLAP for semantic embeddings (~4 GB download)
-pip install ".[clap]"
-```
-
-### Option 2: Free Cloud GPU (Kaggle Notebook)
-Best for processing many tracks quickly (20-30 seconds per track) without paying for cloud compute.
-
-1. Create a new notebook on [Kaggle](https://www.kaggle.com).
-2. In the right panel, under **Accelerator**, select **GPU T4 x2**.
-3. Add the following to the first cell to install the project with CUDA acceleration:
-```python
-!git clone https://github.com/ripunjay-kashyap/audio-sonic-mcp.git
-%cd audio-sonic-mcp
-
-!apt-get update && apt-get install -y ffmpeg
-!pip install demucs yt-dlp librosa soundfile madmom
-!pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu118
-```
-4. You can now import and run `server.py` or trigger inference scripts directly within the notebook!
-
-### Option 3: Containerized Deployment (Docker)
-Best for deploying to a cloud VM (e.g., AWS `g5`, GCP `n1` with T4) or a local machine with a dedicated GPU.
-
-```bash
-# Build the container
-docker build -t audio-sonic-mcp .
-
-# Create persistent directories for outputs and models
-mkdir -p stems models
-
-# Run with GPU support (Requires nvidia-container-toolkit)
-docker run -it --rm --gpus all \
-  -v $(pwd)/stems:/app/stems \
-  -v $(pwd)/models:/app/models \
-  audio-sonic-mcp
-```
-
-### Claude Desktop Integration
-
-#### Step 1 — Open the config file
-
-The easiest way is through Claude Desktop itself:
-
-1. Open Claude Desktop
-2. Click your **profile icon** (bottom-left)
-3. Go to **Settings → Developer**
-4. Click **Edit Config**
-
-This opens `claude_desktop_config.json` in your default text editor.
-
-> **Prefer to open it manually?** The file is named `claude_desktop_config.json`. Default locations:
-> - **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
-> - **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
-> - **Linux:** `~/.config/Claude/claude_desktop_config.json`
+#### Installing FFmpeg:
+* **macOS**: `brew install ffmpeg`
+* **Linux (Debian/Ubuntu)**: `sudo apt update && sudo apt install -y ffmpeg`
+* **Windows**: Run `winget install Gyan.FFmpeg` via PowerShell (Administrator), or download manually from [ffmpeg.org](https://ffmpeg.org/download.html) and add the `bin` directory to your system environment variables.
 
 ---
 
-#### Step 2 — Add the server entry
+### Step-by-Step Installation
 
-Paste the block below into `claude_desktop_config.json`, replacing the path placeholders with your actual install paths.
+1. **Clone the Repository**
+   ```bash
+   git clone https://github.com/ripunjay-kashyap/audio-sonic-mcp.git
+   cd audio-sonic-mcp
+   ```
 
-**Windows**
+2. **Initialize Virtual Environment**
+   ```bash
+   python -m venv .venv
+   # Activate on macOS/Linux:
+   source .venv/bin/activate
+   # Activate on Windows (PowerShell):
+   .venv\Scripts\activate
+   ```
+
+3. **Install Dependencies**
+   Choose between the lightweight core engine or the full high-fidelity ML suite:
+   
+   * **Option A: Full High-Fidelity ML Suite (Recommended)**
+     Includes demixing stems (Demucs) and zero-shot vibe vectors (CLAP). Requires ~4 GB disk space.
+     ```bash
+     pip install -e ".[clap]"
+     ```
+   * **Option B: Core Lightweight Pipeline**
+     Uses standard digital signal processing (HPSS/librosa). Rapid install and minimal footprint.
+     ```bash
+     pip install -e .
+     ```
+
+> [!NOTE]
+> The optional `[clap]` stack installs `torch`, `torchaudio`, `transformers`, and `demucs`. Without these, the server automatically switches to light fallbacks (HPSS instead of Demucs, standard feature matrices instead of CLAP vectors, and leaves out `vibe_tags`).
+
+---
+
+## 🤖 MCP Client Configuration Guide
+
+Audio Sonic MCP registers itself as a standard package script. This enables you to run it using the global executable name (`audio-sonic-mcp`) directly from your virtual environment's bin folder, or run the script file manually.
+
+### 1. Claude Desktop Setup
+Open your Claude configuration file:
+* **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
+* **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+* **Linux**: `~/.config/Claude/claude_desktop_config.json`
+
+Add the server to your `mcpServers` object:
+
 ```json
 {
   "mcpServers": {
     "audio-sonic-mcp": {
-      "command": "C:\\path\\to\\audio-sonic-mcp\\.venv\\Scripts\\python.exe",
-      "args": [
-        "C:\\path\\to\\audio-sonic-mcp\\server.py"
-      ],
+      "command": "C:\\path\\to\\audio-sonic-mcp\\.venv\\Scripts\\audio-sonic-mcp.exe",
+      "args": [],
       "env": {
         "JOBS_ROOT": "C:\\path\\to\\audio-sonic-mcp\\jobs"
       }
@@ -255,15 +164,31 @@ Paste the block below into `claude_desktop_config.json`, replacing the path plac
 }
 ```
 
-**macOS / Linux**
+> [!IMPORTANT]
+> **Windows Users**: Always use **double backslashes** (`\\`) in JSON configuration paths. Point the executable directly to the `.exe` inside your `.venv\Scripts\` directory.
+
+---
+
+### 2. Cursor IDE Integration
+To integrate Audio Sonic MCP into Cursor's AI pane:
+1. Navigate to **Settings** ➔ **Features** ➔ **MCP**.
+2. Click **+ Add New MCP Server**.
+3. Fill in the parameters:
+   * **Name**: `audio-sonic-mcp`
+   * **Type**: `command`
+   * **Command**: `/path/to/audio-sonic-mcp/.venv/bin/audio-sonic-mcp` (use `.exe` extension on Windows)
+
+---
+
+### 3. Windsurf Integration
+Open your Windsurf MCP configurations file (typically found at `~/.codeium/windsurf/mcp_config.json`) and append the configuration:
+
 ```json
 {
   "mcpServers": {
     "audio-sonic-mcp": {
       "command": "/path/to/audio-sonic-mcp/.venv/bin/python",
-      "args": [
-        "/path/to/audio-sonic-mcp/server.py"
-      ],
+      "args": ["/path/to/audio-sonic-mcp/server.py"],
       "env": {
         "JOBS_ROOT": "/path/to/audio-sonic-mcp/jobs"
       }
@@ -272,40 +197,126 @@ Paste the block below into `claude_desktop_config.json`, replacing the path plac
 }
 ```
 
-> **Note:** JSON requires double backslashes `\\` for Windows paths.
-
 ---
 
-#### Step 3 — Restart Claude Desktop
+### 4. Cline (VS Code Extension) Setup
+Open Cline's MCP setting file (usually located at `%APPDATA%\Code\User\globalStorage\saoudrizwan.claude-dev\settings\cline_mcp_settings.json` or equivalent platform storage) and add:
 
-Fully quit Claude Desktop (system tray → right-click → **Quit**, or Task Manager on Windows) and reopen it.
-
-> **First launch takes 1–3 minutes.** On the very first run, the server downloads the Demucs model weights (~400 MB) before it starts accepting requests. This is a one-time download — subsequent startups take ~10 seconds. Claude Desktop may show the server as "connecting" during this time; that is normal.
-
----
-
-#### Step 4 — Verify the connection
-
-Once Claude Desktop reopens, look for the **hammer icon** (🔨) in the chat input bar — that confirms the MCP server is connected.
-
-To run a health check, ask Claude:
-
-> *"Check the health of the audio-sonic-mcp server"*
-
-Then try a real analysis:
-
-> *"Get the sonic signature for [YouTube URL]"*
-
-**Option B: Docker (Requires Option 3 installation)**
 ```json
 {
   "mcpServers": {
     "audio-sonic-mcp": {
+      "command": "/path/to/audio-sonic-mcp/.venv/bin/audio-sonic-mcp",
+      "args": [],
+      "env": {
+        "JOBS_ROOT": "/path/to/audio-sonic-mcp/jobs"
+      }
+    }
+  }
+}
+```
+
+---
+
+## 🤖 Interaction Flow for AI Agents & LLMs
+
+LLMs automatically learn how to use this server by reading its exposed tool definitions. Because audio stem separation and CLAP embeddings are computationally demanding, Audio Sonic MCP uses an **Asynchronous Fire-and-Forget Job Pattern**.
+
+### Automated LLM Workflow
+```
+  [User Prompts LLM]
+          │
+          ▼
+1. Submit URL ──────────────► [Tool: get_sonic_signature]
+                                      │ (Returns Job ID instantly)
+                                      ▼
+2. Notify User ◄───────────── [LLM acknowledges job is queued]
+          │
+          ├───► 3. Wait 10-15s (Or proceed with other tasks)
+          │
+          ▼
+4. Check Progress ──────────► [Tool: get_job_status]
+                                      │ (Checks status: running/success/error)
+                                      ▼
+5. Present Signature ◄─────── [LLM formats rich output for user]
+```
+
+### Natural Prompts to Try
+* *"Check the health of my audio-sonic-mcp server to make sure all ML components are ready."*
+* *"Submit this YouTube track for sonic analysis: `https://www.youtube.com/watch?v=XXXXXX`."*
+* *"Check the progress of my sonic signature job `sig_a1b2c3d4` and summarize the BPM, production width, and vibe once complete."*
+
+---
+
+## 🎚️ CLI Usage (Local Files)
+
+For musicians, engineers, and producers working directly in the terminal, you can analyze a full-length local file directly without running any background servers:
+
+```bash
+# Get a visual, musician-friendly sonic signature digest (recommended)
+python analyze_file.py "my_demo.wav" --summary
+
+# Print full raw JSON directly to the stdout stream
+python analyze_file.py "my_demo.wav"
+
+# Dump JSON payload to a file while keeping the stdout clean
+python analyze_file.py "my_demo.wav" > signature.json
+```
+
+### CLI Command Options Reference
+
+| Option | Shorthand | Description |
+|---|---|---|
+| `path` | *None* | Absolute or relative path to the local audio file (Required). |
+| `--summary` | `-s` | Print a clean, formatted terminal summary instead of standard JSON. |
+| `--no-vector` | *None* | Generate JSON signature but omit the heavy 512-dimension vibe float array. |
+| `--out FILE` | `-o` | Output the final JSON signature directly to the specified file. |
+| `--keep` | `-k` | Do not delete intermediate WAV files or separated stem files in `jobs/`. |
+| `--job-id ID` | `-j` | Explicitly define the internal identifier (useful for batch scripts). |
+
+**Supported File Formats**: `wav`, `mp3`, `flac`, `ogg`, `m4a`, `aac`.
+
+---
+
+## 🔧 Environment Variables Reference
+
+Configure environment options by declaring these variables in your active terminal session, container environment, or the `env` block of your MCP configuration file:
+
+| Variable | Default Value | Description / Practical Use |
+|---|---|---|
+| `JOBS_ROOT` | `./jobs` | Workspace directory where audio files, temporary converted WAVs, and stems are processed. |
+| `KEEP_JOB_FILES` | *Unset* | Set to `1` or `true` to keep separated stem WAVs on disk (adds ~75MB per job, useful for troubleshooting). |
+| `FILE_MAX_DURATION_SEC`| `600` | Safety ceiling for local file processing duration (YouTube downloads are capped at 60 minutes). |
+| `FFMPEG_BIN` | *Unset* | Path to folder containing the `ffmpeg` binary if it is not present in your system `PATH`. |
+| `YTDLP_PROXY` | *Unset* | HTTP/SOCKS proxy string passed directly to `yt-dlp` to bypass rate limits or network blocks. |
+
+---
+
+## 🐳 Docker / Podman Execution
+
+If you prefer to avoid setting up local Python libraries, running via containers encapsulates FFmpeg, yt-dlp, and the core Python dependencies (CPU-based pipeline):
+
+```bash
+# Build the container image
+docker build -t audio-sonic-mcp .
+
+# Run the MCP server over stdio, mounting local folders for job persistence
+docker run -i --rm \
+  -v "$(pwd)/jobs:/app/jobs" \
+  -v "$(pwd)/models:/app/models" \
+  audio-sonic-mcp
+```
+
+To connect Claude Desktop to your Docker container, configure `claude_desktop_config.json`:
+```json
+{
+  "mcpServers": {
+    "audio-sonic-mcp-docker": {
       "command": "docker",
       "args": [
         "run", "-i", "--rm",
-        "-v", "/absolute/path/to/audio-sonic-mcp/jobs:/app/jobs",
-        "-v", "/absolute/path/to/audio-sonic-mcp/models:/app/models",
+        "-v", "/absolute/path/to/jobs:/app/jobs",
+        "-v", "/absolute/path/to/models:/app/models",
         "audio-sonic-mcp"
       ]
     }
@@ -315,83 +326,77 @@ Then try a real analysis:
 
 ---
 
-## Local File Analysis (CLI)
+## ⚙️ How it Works under the Hood
 
-For human musicians at a terminal, the project provides a standalone CLI script `analyze_file.py` to analyze local audio files (full-song) synchronously without running or configuring the MCP server.
+Audio Sonic MCP pipelines are constructed modularly, using transactional checkpoints to ensure reliability. 
 
-### Usage
-
-Run the script from the repository root using the project's virtual environment. The only required argument is the path to your audio file:
-
-```powershell
-# Basic usage (prints JSON to the terminal)
-.venv\Scripts\python.exe analyze_file.py "C:\Music\my_demo.mp3"
-
-# Save the result to a file (still prints to the terminal too)
-.venv\Scripts\python.exe analyze_file.py "C:\Music\my_demo.mp3" --out "C:\Music\my_demo_result.json"
-
-# Capture ONLY the JSON to a file — progress logs stay on screen (they go to stderr)
-.venv\Scripts\python.exe analyze_file.py "C:\Music\my_demo.mp3" > result.json
-
-# Keep intermediate job files (converted WAV + separated stems) for inspection
-.venv\Scripts\python.exe analyze_file.py "C:\Music\my_demo.mp3" --keep
-
-# Human-readable digest only (no JSON) — quick read for musicians
-.venv\Scripts\python.exe analyze_file.py "C:\Music\my_demo.mp3" --summary
+```text
+  LLM Agent / Claude Desktop                 Musician (Terminal)
+            │                                          │
+            │  MCP (stdio JSON-RPC)                    │  analyze_file.py
+            ▼                                          ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│  Modular 6-Stage Analysis Pipeline                                       │
+│                                                                          │
+│  Stage 1: Ingestion   │ Pre-checks format, scans duration metadata       │
+│  Stage 2: Download    │ Fetches audio tracks via yt-dlp (URLs only)      │
+│  Stage 3: Conversion  │ normalizes sample formats to 44.1kHz WAV (FFmpeg)│
+│  Stage 4: Separation  │ Splits stems: Vocals, Drums, Bass, Other (Demucs)│
+│  Stage 5: Analysis    │ Computes BPM, modulations, key, punch (librosa)  │
+│  Stage 6: Embeddings  │ Generates 512-dim zero-shot music vibe tags (CLAP)│
+└─────────────────────────────────────┬────────────────────────────────────┘
+                                      ▼
+             Result Payload: (header · sonic_signature · telemetry)
 ```
 
-### Arguments
-
-| Argument | Short | Required | Description |
-|---|---|---|---|
-| `path` | — | **Yes** | Path to the local audio file to analyze (positional) |
-| `--out` | `-o` | No | Also write the JSON result to this file |
-| `--keep` | `-k` | No | Keep intermediate WAV + stems under `jobs/` (default: deleted on exit) |
-| `--job-id` | `-j` | No | Custom job ID; otherwise auto-generated as `file_<8hex>` |
-| `--summary` | `-s` | No | Print a human-readable digest (KEY, BPM, vibe tags, production profile) instead of the JSON |
-| `--no-vector` | — | No | Print full JSON but omit the 512-float `vibe_vector` array |
-
-**Accepted file types:** `mp3`, `wav`, `flac`, `ogg`, `m4a`, `aac`. Any other extension is rejected before processing.
-
-**Vibe tags:** the JSON includes a `vibe_tags` field — human-readable mood/genre/texture words (e.g. `aggressive · dark · hip-hop`) derived from the CLAP embedding via zero-shot matching. Requires the CLAP extra (`pip install ".[clap]"`); without it the field is `null` and the summary shows `(unavailable)`.
-
-### Environment Variables
-
-| Variable | Default | Effect |
-|---|---|---|
-| `FILE_MAX_DURATION_SEC` | `600` (10 min) | Maximum allowed file length; the CLI errors out over the limit (CLI-only — the URL path keeps its 60-min limit) |
-| `KEEP_JOB_FILES` | unset | Equivalent to `--keep` when set to `1`/`true`/`yes` |
-
-```powershell
-# Allow files up to 15 minutes for this run
-$env:FILE_MAX_DURATION_SEC="900"; .venv\Scripts\python.exe analyze_file.py "C:\Music\long_jam.wav"
-```
-
-### Key Differences from the MCP / URL Workflow
-1. **Full-Song Analysis:** Unlike the URL/MCP workflow which scans the first 60 seconds (SSM chorus window), the CLI processes the **entire song**. Demos often have no clear chorus, and full-song analysis avoids structural/key detection fragility.
-2. **Read In-Place:** The script never moves, copies, or alters your original audio file. It generates a temporary `input.wav` and stems inside the `jobs/` directory, which are cleaned up automatically upon exit (unless `--keep` is specified).
-3. **Environment:** FFmpeg must be installed and on your system `PATH`. The script automatically adds `.venv\Scripts` and Gyan FFmpeg paths internally.
-
-### Performance Note
-Full-song separation on CPU is computationally heavy and takes about ~4× the duration of the audio (e.g. a 3-minute song takes about 12 minutes to process). If a CUDA-enabled GPU is available, execution takes under 30 seconds.
+1. **Stem Demixing**: Meta AI's **Demucs (`mdx_extra`)** separates the track into isolation stems (`vocals`, `drums`, `bass`, `other`). If missing, it gracefully drops back to **Harmonic-Percussive Source Separation (HPSS)**.
+2. **Analysis engine**: **librosa** extracts rhythmic and tonal structures, matching chord patterns and sub-bass movements against Krumhansl-Schmuckler and Phrygian template engines.
+3. **Semantic Vibe Tagging**: **LAION CLAP** (`laion/larger_clap_music_and_speech`) runs zero-shot inference against high-coverage aesthetic descriptors (moods, textures, genres), choosing top candidates across stylistic poles.
 
 ---
 
-## MCP Tools Exposed
+## 🩺 Resiliency & Troubleshooting
 
-| Tool | Description |
-|------|-------------|
-| `get_sonic_signature(url, job_id?)` | Submits a full pipeline job; returns structured JSON payload |
-| `get_job_status(job_id)` | Polls the status and result of a submitted job |
-| `list_jobs()` | Lists all jobs and their current status |
-| `check_health()` | Verifies FFmpeg, yt-dlp, and Python package availability |
+### 1. One-Time Setup Download Delays
+Upon the **very first analysis job** utilizing the full ML pipeline, `demucs` and `transformers` will download their pre-trained model weights (approximately **400 MB** for Demucs, and **200 MB** for CLAP). 
+* The server redirects download progress indicators to `stderr` so they **do not corrupt** the JSON-RPC standard stream.
+* During this download, `get_job_status` will remain in `running`. Allow 1–3 minutes depending on your network speed. Subsequent startups take under **10 seconds**.
+
+### 2. FastMCP Concurrency Controls
+Model inference on multi-staged architectures is highly CPU/VRAM intensive. To protect consumer hardware and virtual environments from crashing (OutOfMemory exceptions), Audio Sonic MCP enforces a strict global serialization lock (`CONCURRENCY_LOCK`). 
+* If you submit multiple URLs simultaneously, they will be processed **sequentially**. 
+* Polling `get_job_status` for subsequent jobs will report `queued` or `running` while they wait in the pipeline queue.
+
+### 3. Windows Librosa Deadlock Fix
+FastMCP thread dispatching under Windows can cause Numba compilation deadlocks inside background worker threads. To prevent this, Audio Sonic MCP incorporates a **Pre-warming Routine** (`_prewarm_librosa()` and `_prewarm_demucs()`) on launch. It forces JIT compile of resampling, HPSS, and mono-mixing functions in the main thread before starting the RPC listener.
+
+### 4. Diagnosing with `check_health`
+If the server reports as `degraded` or tools are missing, call the `check_health` tool or check CLI warnings. It queries:
+* Availability of `ffmpeg` on the execution path.
+* Installation status of Python packages (`librosa`, `soundfile`, `mcp`, etc.).
+* Access permissions to the `JOBS_ROOT` directory.
 
 ---
 
-## System Requirements
+## 🛠️ Development & Testing
 
-- Python 3.10+
-- FFmpeg (on system PATH)
-- yt-dlp
-- Demucs
-- Optional: `transformers`, `torch`, `torchaudio` for CLAP embeddings
+Run unit tests inside your virtual environment to verify the mathematical pipelines using synthesized audio waveforms:
+
+```bash
+# Install development test framework
+pip install -e ".[dev]"
+
+# Execute full suite (requires no network or model downloads)
+pytest
+
+# Test specifically CLI execution code paths
+pytest tests/test_cli.py
+```
+
+---
+
+## 📄 License
+
+Distributed under the **MIT License**. See `LICENSE` for details.
+
+© 2026 Ripunjay Kashyap. All rights reserved.
