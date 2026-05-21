@@ -207,4 +207,49 @@ class TestAssembleVibeTags:
         assert p["sonic_signature"]["bpm"] == 120.0  # rest of payload intact
 
 
+class TestPrintSummary:
+    def _payload(self, vibe_tags=["aggressive", "dark", "hip-hop"]):
+        return {
+            "header": {
+                "confidence_score": 0.78,
+                "source_metadata": {"title": "input", "duration_sec": 102.34},
+            },
+            "sonic_signature": {
+                "bpm": 153.85, "bpm_variable": False, "bpm_range": None,
+                "key": "G Major", "mode_confidence": 0.63, "key_variable": True,
+                "key_map": [
+                    {"start_sec": 0.0, "end_sec": 30.0, "key": "G Major"},
+                    {"start_sec": 30.0, "end_sec": 90.0, "key": "G Phrygian"},
+                ],
+                "vibe_vector": [0.0] * 512,
+                "vibe_tags": vibe_tags,
+                "production_profile": {
+                    "vocal_presence": "forward", "transient_punch": 0.325,
+                    "stereo_width": "narrow",
+                    "dominant_freq_peaks_hz": {"harmonic": [49.7, 49.4], "percussive": []},
+                },
+            },
+            "telemetry": {"inference_time_sec": 322.81},
+        }
+
+    def test_renders_core_fields(self, capsys):
+        from analyze_file import _print_summary
+        _print_summary(self._payload())
+        out = capsys.readouterr().out
+        assert "SONIC SIGNATURE" in out
+        assert "153" in out and "BPM" in out
+        assert "G Major" in out and "shifts to G Phrygian" in out
+        assert "aggressive · dark · hip-hop" in out
+        assert "forward" in out
+        assert "78%" in out
+        assert "0.0," not in out  # the 512 array is NOT printed
+
+    def test_unavailable_vibe_when_tags_none(self, capsys):
+        from analyze_file import _print_summary
+        _print_summary(self._payload(vibe_tags=None))
+        out = capsys.readouterr().out
+        assert "unavailable" in out
+
+
+
 

@@ -64,6 +64,67 @@ def _cleanup_job_artifacts(job_dir: Path, keep_job_files: bool = False) -> None:
     logger.info("Cleanup: freed %.1f MB from %s", removed_bytes / 1_048_576, job_dir.name)
 
 
+def _fmt_mmss(seconds: float) -> str:
+    s = int(round(seconds or 0))
+    return f"{s // 60}:{s % 60:02d}"
+
+
+def _punch_label(v: float) -> str:
+    if v < 0.33:
+        return "low"
+    if v < 0.66:
+        return "moderate"
+    return "high"
+
+
+def _print_summary(payload: dict) -> None:
+    """Print a compact, musician-friendly digest (no JSON, no 512-float vector)."""
+    sm = payload["header"]["source_metadata"]
+    ss = payload["sonic_signature"]
+    pp = ss["production_profile"]
+
+    title = sm.get("title") or "audio"
+    dur = _fmt_mmss(sm.get("duration_sec") or 0)
+
+    if ss.get("bpm_variable") and ss.get("bpm_range"):
+        lo, hi = ss["bpm_range"]
+        tempo = f"{ss['bpm']:.1f} BPM  (variable {lo:.0f}–{hi:.0f})"
+    else:
+        tempo = f"{ss['bpm']:.1f} BPM  (steady)"
+
+    base_key = ss.get("key", "Unknown")
+    key_line = base_key
+    if ss.get("key_variable") and ss.get("key_map"):
+        shift = next((seg for seg in ss["key_map"] if seg.get("key") != base_key), None)
+        if shift:
+            key_line = f"{base_key}  ·  shifts to {shift['key']} @{_fmt_mmss(shift['start_sec'])}"
+    conf = ss.get("mode_confidence")
+    if conf is not None:
+        key_line += f"   (confidence {round(conf * 100)}%)"
+
+    tags = ss.get("vibe_tags")
+    vibe = " · ".join(tags) if tags else "(unavailable — CLAP not installed)"
+
+    punch = pp.get("transient_punch")
+    punch_str = f"{punch:.2f}  ({_punch_label(punch)})" if punch is not None else "n/a"
+    harm = (pp.get("dominant_freq_peaks_hz") or {}).get("harmonic") or []
+    low_end = f"~{round(sum(harm) / len(harm))} Hz dominant" if harm else "n/a"
+
+    overall = round((payload["header"].get("confidence_score") or 0) * 100)
+    elapsed = _fmt_mmss(payload.get("telemetry", {}).get("inference_time_sec") or 0)
+
+    print(f"\n\U0001F3B5 SONIC SIGNATURE — {title}  ({dur})\n")
+    print(f"  TEMPO    {tempo}")
+    print(f"  KEY      {key_line}")
+    print(f"  VIBE     {vibe}\n")
+    print("  PRODUCTION")
+    print(f"    Vocals     {pp.get('vocal_presence', 'n/a')}")
+    print(f"    Punch      {punch_str}")
+    print(f"    Stereo     {pp.get('stereo_width', 'n/a')}")
+    print(f"    Low end    {low_end}\n")
+    print(f"  Overall confidence: {overall}%   ·   analyzed in {elapsed}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Analyze a local audio file and output its sonic signature."
