@@ -56,6 +56,10 @@ def validate_source(url: str) -> dict:
         "no_warnings": True,
         "geo_bypass": True,
         "socket_timeout": 30,
+        # Resolve watch?v=X&list=RD...&start_radio=1 to the single video X instead
+        # of following the playlist/radio (which lands on a different, often
+        # unavailable, track). Browser-copied YouTube URLs usually carry these.
+        "noplaylist": True,
     }
 
     proxy_url = os.environ.get("YTDLP_PROXY")

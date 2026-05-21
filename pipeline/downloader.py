@@ -49,7 +49,9 @@ def download_audio(url: str, job_id: str, jobs_root: Path) -> Path:
     ydl_opts = {
         "format": "bestaudio/best",
         "outtmpl": output_template,
-        "no_playlist": True,
+        # Correct key is "noplaylist" — yt-dlp silently ignores the misspelled
+        # "no_playlist". Ensures a radio/playlist URL downloads only the video.
+        "noplaylist": True,
         "geo_bypass": True,
         "logger": _YtdlpLogger(),
         "noprogress": False,

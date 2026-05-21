@@ -132,6 +132,20 @@ class TestValidateSource:
         clients = opts.get("extractor_args", {}).get("youtube", {}).get("player_client", [])
         assert "android" not in clients
 
+    def test_disables_playlist_for_radio_urls(self):
+        """Regression: a YouTube radio/playlist URL (watch?v=X&list=RD...&start_radio=1)
+        must resolve to the single video, not follow the radio into a different
+        (often unavailable) track. The probe must pass noplaylist=True to yt-dlp."""
+        meta = {"title": "T", "duration": 60, "uploader": "U"}
+        with patch(
+            "pipeline.ingestion.yt_dlp.YoutubeDL", return_value=make_ydl_mock(meta)
+        ) as mock_cls:
+            validate_source(
+                "https://www.youtube.com/watch?v=test&list=RDtest&start_radio=1"
+            )
+        opts = mock_cls.call_args.args[0]
+        assert opts.get("noplaylist") is True
+
 
 # ── validate_url_format ───────────────────────────────────────────────────────
 

@@ -25,3 +25,21 @@ def test_download_audio_does_not_pin_android_player_client(tmp_path):
     clients = opts.get("extractor_args", {}).get("youtube", {}).get("player_client", [])
     assert "android" not in clients
     assert result.name == "raw_audio.mp4"
+
+
+def test_download_audio_disables_playlist(tmp_path):
+    """Regression: a radio/playlist URL must download only the single video, not
+    the whole radio. Requires noplaylist=True — note yt-dlp silently ignores the
+    misspelled 'no_playlist', so the exact key matters."""
+    job_id = "job_np"
+    job_dir = tmp_path / job_id
+    job_dir.mkdir(parents=True)
+    (job_dir / "raw_audio.mp4").write_bytes(b"\x00")
+
+    with patch(
+        "pipeline.downloader.yt_dlp.YoutubeDL", return_value=make_ydl_mock()
+    ) as mock_cls:
+        download_audio("https://www.youtube.com/watch?v=test&list=RDtest", job_id, tmp_path)
+
+    opts = mock_cls.call_args.args[0]
+    assert opts.get("noplaylist") is True
