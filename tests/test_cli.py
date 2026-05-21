@@ -136,30 +136,42 @@ class TestCLISubprocess:
         assert json.loads(out_json.read_text(encoding="utf-8")) == parsed
 
 
-class TestRankTags:
-    def test_orders_by_similarity_and_applies_floor(self):
-        from pipeline.vectorizer import _rank_tags
-        text = np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=float)
-        labels = ["a", "b", "c"]
-        audio = np.array([0.3, 0.9, -0.2], dtype=float)  # sims: a=.31 b=.92 c=-.21
-        out = _rank_tags(audio, text, labels, top_n=5, floor=0.0)
-        assert out == ["b", "a"]  # c dropped by floor 0.0 (negative sim)
+class TestSelectTagsPerAxis:
+    def test_spans_axes_in_order(self):
+        from pipeline.vectorizer import _select_tags_per_axis
+        vocab = [
+            ("m1", "mood"), ("m2", "mood"), ("m3", "mood"),
+            ("e1", "energy"), ("e2", "energy"),
+            ("g1", "genre"), ("g2", "genre"),
+            ("t1", "texture"), ("t2", "texture"),
+        ]
+        text = np.eye(len(vocab))
+        audio = np.zeros(len(vocab))
+        # mood: m2>m1>m3 ; energy: e1>e2 ; genre: g2>g1 ; texture: t1>t2
+        audio[1], audio[0], audio[2] = 0.9, 0.8, 0.1
+        audio[3], audio[4] = 0.7, 0.2
+        audio[6], audio[5] = 0.6, 0.3
+        audio[7], audio[8] = 0.5, 0.2
+        counts = {"mood": 2, "energy": 1, "genre": 1, "texture": 1}
+        out = _select_tags_per_axis(audio, text, vocab, counts, floor=0.0)
+        # 2 mood + 1 energy + 1 genre + 1 texture, in axis order, within-axis by sim
+        assert out == ["m2", "m1", "e1", "g2", "t1"]
 
     def test_returns_top1_when_all_below_floor(self):
-        from pipeline.vectorizer import _rank_tags
-        text = np.eye(3)
-        labels = ["a", "b", "c"]
-        audio = np.array([0.1, 0.2, 0.05], dtype=float)
-        out = _rank_tags(audio, text, labels, top_n=5, floor=0.9)
-        assert out == ["b"]  # nothing clears 0.9 -> top-1 returned
+        from pipeline.vectorizer import _select_tags_per_axis
+        vocab = [("m1", "mood"), ("g1", "genre")]
+        text = np.eye(2)
+        audio = np.array([0.1, 0.2], dtype=float)  # g1 highest overall
+        out = _select_tags_per_axis(audio, text, vocab, {"mood": 1, "genre": 1}, floor=0.9)
+        assert out == ["g1"]  # nothing clears 0.9 -> single global top word
 
-    def test_respects_top_n_cap(self):
-        from pipeline.vectorizer import _rank_tags
-        text = np.eye(4)
-        labels = ["a", "b", "c", "d"]
-        audio = np.array([0.4, 0.3, 0.2, 0.1], dtype=float)
-        out = _rank_tags(audio, text, labels, top_n=2, floor=0.0)
-        assert out == ["a", "b"]
+    def test_floor_drops_weak_axis_pick(self):
+        from pipeline.vectorizer import _select_tags_per_axis
+        vocab = [("m1", "mood"), ("g1", "genre")]
+        text = np.eye(2)
+        audio = np.array([0.05, 0.8], dtype=float)  # mood weak, genre strong
+        out = _select_tags_per_axis(audio, text, vocab, {"mood": 1, "genre": 1}, floor=0.5)
+        assert out == ["g1"]  # mood pick dropped by floor; genre kept
 
 
 class TestGenerateVibeTags:
@@ -168,21 +180,24 @@ class TestGenerateVibeTags:
         monkeypatch.setattr(vectorizer, "_clap_tag_embeddings", lambda *a, **k: None)
         assert vectorizer.generate_vibe_tags(audio_wav, full_song=True) is None
 
-    def test_returns_ranked_words_when_clap_available(self, monkeypatch, audio_wav):
+    def test_returns_tags_spanning_axes_when_clap_available(self, monkeypatch, audio_wav):
         from pipeline import vectorizer
-        labels = [w for w, _ in vectorizer.VIBE_TAG_PROMPTS]
-        n = len(labels)
+        vocab = vectorizer.VIBE_TAG_VOCAB
+        n = len(vocab)
         text = np.eye(n)
         audio = np.zeros(n)
-        audio[2] = 1.0   # strongest match = labels[2]
-        audio[5] = 0.5
+        mood_idx = next(i for i, (w, ax) in enumerate(vocab) if ax == "mood")
+        genre_idx = next(i for i, (w, ax) in enumerate(vocab) if ax == "genre")
+        audio[mood_idx] = 1.0   # boost one mood word
+        audio[genre_idx] = 0.9  # and one genre word
         monkeypatch.setattr(
             vectorizer, "_clap_tag_embeddings", lambda *a, **k: (audio, text)
         )
         out = vectorizer.generate_vibe_tags(audio_wav, full_song=True)
         assert isinstance(out, list) and len(out) >= 1
-        assert out[0] == labels[2]
-        assert len(out) <= vectorizer.VIBE_TAG_TOP_N
+        assert out[0] == vocab[mood_idx][0]          # mood comes first (axis order)
+        assert vocab[genre_idx][0] in out            # genre present -> spans axes
+        assert len(out) <= sum(vectorizer.VIBE_TAG_AXIS_COUNTS.values())
 
 
 class TestAssembleVibeTags:

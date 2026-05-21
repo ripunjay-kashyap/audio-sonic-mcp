@@ -19,33 +19,32 @@ logger = logging.getLogger(__name__)
 CLAP_MODEL_ID = "laion/larger_clap_music_and_speech"
 VECTOR_DIM = 512
 
-# Vibe-tag vocabulary: (word, prompt-template). Mood/energy/texture use the
-# "sounds {}" frame; genres use the "a {} track" frame (better CLAP text signal).
-VIBE_TAG_PROMPTS: list[tuple[str, str]] = [
+# Vibe-tag vocabulary: (word, axis). Ranking is done PER AXIS (see
+# VIBE_TAG_AXIS_COUNTS) so the output always spans mood/energy/genre/texture
+# instead of collapsing to whichever prompt frame scores highest. Genre words
+# use the "a {} track" prompt frame; all others use "this music sounds {}".
+VIBE_TAG_VOCAB: list[tuple[str, str]] = [
     # Mood
-    ("dark", "this music sounds {}"), ("bright", "this music sounds {}"),
-    ("melancholic", "this music sounds {}"), ("uplifting", "this music sounds {}"),
-    ("aggressive", "this music sounds {}"), ("chill", "this music sounds {}"),
-    ("dreamy", "this music sounds {}"), ("tense", "this music sounds {}"),
-    ("warm", "this music sounds {}"), ("romantic", "this music sounds {}"),
-    ("melodic", "this music sounds {}"),
+    ("dark", "mood"), ("bright", "mood"), ("melancholic", "mood"),
+    ("uplifting", "mood"), ("aggressive", "mood"), ("chill", "mood"),
+    ("dreamy", "mood"), ("tense", "mood"), ("warm", "mood"),
+    ("romantic", "mood"), ("melodic", "mood"),
     # Energy
-    ("energetic", "this music sounds {}"), ("mellow", "this music sounds {}"),
-    ("driving", "this music sounds {}"), ("laid-back", "this music sounds {}"),
-    ("hard-hitting", "this music sounds {}"), ("smooth", "this music sounds {}"),
+    ("energetic", "energy"), ("mellow", "energy"), ("driving", "energy"),
+    ("laid-back", "energy"), ("hard-hitting", "energy"), ("smooth", "energy"),
     # Genre
-    ("hip-hop", "a {} track"), ("trap", "a {} track"), ("lo-fi", "a {} track"),
-    ("jazz", "a {} track"), ("rock", "a {} track"), ("electronic", "a {} track"),
-    ("ambient", "a {} track"), ("soul", "a {} track"), ("R&B", "a {} track"),
-    ("pop", "a {} track"), ("funk", "a {} track"), ("classical", "a {} track"),
+    ("hip-hop", "genre"), ("trap", "genre"), ("lo-fi", "genre"), ("jazz", "genre"),
+    ("rock", "genre"), ("electronic", "genre"), ("ambient", "genre"),
+    ("soul", "genre"), ("R&B", "genre"), ("pop", "genre"), ("funk", "genre"),
+    ("classical", "genre"),
     # Texture
-    ("gritty", "this music sounds {}"), ("clean", "this music sounds {}"),
-    ("distorted", "this music sounds {}"), ("acoustic", "this music sounds {}"),
-    ("synthetic", "this music sounds {}"), ("lush", "this music sounds {}"),
-    ("sparse", "this music sounds {}"),
+    ("gritty", "texture"), ("clean", "texture"), ("distorted", "texture"),
+    ("acoustic", "texture"), ("synthetic", "texture"), ("lush", "texture"),
+    ("sparse", "texture"),
 ]
-VIBE_TAG_TOP_N = 5
-VIBE_TAG_FLOOR = 0.0  # cosine floor; calibrate upward after observing real runs
+# Tags taken from each axis (total = 5) — guarantees a spread across categories.
+VIBE_TAG_AXIS_COUNTS: dict[str, int] = {"mood": 2, "energy": 1, "genre": 1, "texture": 1}
+VIBE_TAG_FLOOR = 0.0  # cosine floor; calibrate upward to drop weak per-axis picks
 
 
 
@@ -175,8 +174,9 @@ def generate_vibe_tags(wav_path: Path, full_song: bool = False) -> "list[str] | 
         logger.info("vibe_tags: CLAP unavailable — returning None")
         return None
     audio_emb, text_embs = embs
-    labels = [w for w, _ in VIBE_TAG_PROMPTS]
-    tags = _rank_tags(audio_emb, text_embs, labels, VIBE_TAG_TOP_N, VIBE_TAG_FLOOR)
+    tags = _select_tags_per_axis(
+        audio_emb, text_embs, VIBE_TAG_VOCAB, VIBE_TAG_AXIS_COUNTS, VIBE_TAG_FLOOR
+    )
     logger.info("vibe_tags: %s", ", ".join(tags))
     return tags
 
@@ -196,7 +196,7 @@ def _clap_tag_embeddings(
         model.eval()
 
         audio = _load_audio(wav_path, sr=48000, full_song=full_song)
-        prompts = [tmpl.format(w) for w, tmpl in VIBE_TAG_PROMPTS]
+        prompts = [_vibe_prompt(word, axis) for word, axis in VIBE_TAG_VOCAB]
 
         a_in = processor(audio=[audio], sampling_rate=48000, return_tensors="pt")
         a_in = {k: v.to(device) for k, v in a_in.items()}
@@ -226,25 +226,44 @@ def _embed_to_numpy(raw) -> np.ndarray:
     return raw.detach().cpu().numpy()
 
 
-def _rank_tags(
+def _vibe_prompt(word: str, axis: str) -> str:
+    """CLAP text prompt for a vocab word. Genres read better as 'a X track';
+    mood/energy/texture as 'this music sounds X'."""
+    return f"a {word} track" if axis == "genre" else f"this music sounds {word}"
+
+
+def _select_tags_per_axis(
     audio_emb: np.ndarray,
     text_embs: np.ndarray,
-    labels: list[str],
-    top_n: int,
+    vocab: list[tuple[str, str]],
+    axis_counts: dict[str, int],
     floor: float,
 ) -> list[str]:
-    """Rank labels by cosine similarity of their text embeddings to the audio
-    embedding. Keep those at/above ``floor``, capped at ``top_n``. If nothing
-    clears the floor, return the single highest-ranked label (CLAP still ran)."""
+    """Pick the top tags *per axis* (mood/energy/genre/texture) by cosine
+    similarity, so the result spans categories instead of collapsing to one.
+    Each axis competes only against itself, so cross-frame cosine bias (genre
+    "a X track" prompts scoring higher than mood "sounds X" prompts) can no
+    longer crowd out an axis. Returns words in axis order, within-axis by
+    similarity; falls back to the single global top word if nothing clears
+    ``floor``."""
     a = audio_emb / (np.linalg.norm(audio_emb) or 1.0)
     t = text_embs / (np.linalg.norm(text_embs, axis=1, keepdims=True) + 1e-9)
     sims = t @ a  # (N,)
-    order = np.argsort(sims)[::-1]
-    ranked = [(labels[i], float(sims[i])) for i in order]
-    kept = [w for w, s in ranked if s >= floor][:top_n]
-    if not kept:
-        kept = [ranked[0][0]]
-    return kept
+
+    by_axis: dict[str, list[tuple[float, str]]] = {}
+    for i, (word, axis) in enumerate(vocab):
+        by_axis.setdefault(axis, []).append((float(sims[i]), word))
+
+    selected: list[str] = []
+    for axis in ("mood", "energy", "genre", "texture"):
+        ranked = sorted(by_axis.get(axis, []), reverse=True)
+        for sim, word in ranked[: axis_counts.get(axis, 0)]:
+            if sim >= floor:
+                selected.append(word)
+
+    if not selected:
+        return [vocab[int(np.argmax(sims))][0]]
+    return selected
 
 
 # ── Shared utility ────────────────────────────────────────────────────────────
