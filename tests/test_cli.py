@@ -161,3 +161,27 @@ class TestRankTags:
         out = _rank_tags(audio, text, labels, top_n=2, floor=0.0)
         assert out == ["a", "b"]
 
+
+class TestGenerateVibeTags:
+    def test_returns_none_when_clap_unavailable(self, monkeypatch, audio_wav):
+        from pipeline import vectorizer
+        monkeypatch.setattr(vectorizer, "_clap_tag_embeddings", lambda *a, **k: None)
+        assert vectorizer.generate_vibe_tags(audio_wav, full_song=True) is None
+
+    def test_returns_ranked_words_when_clap_available(self, monkeypatch, audio_wav):
+        from pipeline import vectorizer
+        labels = [w for w, _ in vectorizer.VIBE_TAG_PROMPTS]
+        n = len(labels)
+        text = np.eye(n)
+        audio = np.zeros(n)
+        audio[2] = 1.0   # strongest match = labels[2]
+        audio[5] = 0.5
+        monkeypatch.setattr(
+            vectorizer, "_clap_tag_embeddings", lambda *a, **k: (audio, text)
+        )
+        out = vectorizer.generate_vibe_tags(audio_wav, full_song=True)
+        assert isinstance(out, list) and len(out) >= 1
+        assert out[0] == labels[2]
+        assert len(out) <= vectorizer.VIBE_TAG_TOP_N
+
+

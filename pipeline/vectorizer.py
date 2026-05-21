@@ -19,6 +19,35 @@ logger = logging.getLogger(__name__)
 CLAP_MODEL_ID = "laion/larger_clap_music_and_speech"
 VECTOR_DIM = 512
 
+# Vibe-tag vocabulary: (word, prompt-template). Mood/energy/texture use the
+# "sounds {}" frame; genres use the "a {} track" frame (better CLAP text signal).
+VIBE_TAG_PROMPTS: list[tuple[str, str]] = [
+    # Mood
+    ("dark", "this music sounds {}"), ("bright", "this music sounds {}"),
+    ("melancholic", "this music sounds {}"), ("uplifting", "this music sounds {}"),
+    ("aggressive", "this music sounds {}"), ("chill", "this music sounds {}"),
+    ("dreamy", "this music sounds {}"), ("tense", "this music sounds {}"),
+    ("warm", "this music sounds {}"), ("romantic", "this music sounds {}"),
+    ("melodic", "this music sounds {}"),
+    # Energy
+    ("energetic", "this music sounds {}"), ("mellow", "this music sounds {}"),
+    ("driving", "this music sounds {}"), ("laid-back", "this music sounds {}"),
+    ("hard-hitting", "this music sounds {}"), ("smooth", "this music sounds {}"),
+    # Genre
+    ("hip-hop", "a {} track"), ("trap", "a {} track"), ("lo-fi", "a {} track"),
+    ("jazz", "a {} track"), ("rock", "a {} track"), ("electronic", "a {} track"),
+    ("ambient", "a {} track"), ("soul", "a {} track"), ("R&B", "a {} track"),
+    ("pop", "a {} track"), ("funk", "a {} track"), ("classical", "a {} track"),
+    # Texture
+    ("gritty", "this music sounds {}"), ("clean", "this music sounds {}"),
+    ("distorted", "this music sounds {}"), ("acoustic", "this music sounds {}"),
+    ("synthetic", "this music sounds {}"), ("lush", "this music sounds {}"),
+    ("sparse", "this music sounds {}"),
+]
+VIBE_TAG_TOP_N = 5
+VIBE_TAG_FLOOR = 0.0  # cosine floor; calibrate upward after observing real runs
+
+
 
 def generate_vibe_vector(wav_path: Path, full_song: bool = False) -> list[float]:
     """
@@ -136,6 +165,65 @@ def _librosa_fallback_vector(wav_path: Path, full_song: bool = False) -> list[fl
 
 
 # ── Vibe tags (CLAP zero-shot) ──────────────────────────────────────────────
+
+
+def generate_vibe_tags(wav_path: Path, full_song: bool = False) -> "list[str] | None":
+    """Top vibe/mood/genre words via CLAP zero-shot. Returns None only when
+    CLAP is unavailable (the librosa fallback vector is not in CLAP space)."""
+    embs = _clap_tag_embeddings(wav_path, full_song=full_song)
+    if embs is None:
+        logger.info("vibe_tags: CLAP unavailable — returning None")
+        return None
+    audio_emb, text_embs = embs
+    labels = [w for w, _ in VIBE_TAG_PROMPTS]
+    tags = _rank_tags(audio_emb, text_embs, labels, VIBE_TAG_TOP_N, VIBE_TAG_FLOOR)
+    logger.info("vibe_tags: %s", ", ".join(tags))
+    return tags
+
+
+def _clap_tag_embeddings(
+    wav_path: Path, full_song: bool = False
+) -> "tuple[np.ndarray, np.ndarray] | None":
+    """Return (audio_embedding (D,), text_embeddings (N, D)) from CLAP, or None
+    if CLAP/transformers is unavailable or errors."""
+    try:
+        from transformers import ClapModel, ClapProcessor
+        import torch
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        processor = ClapProcessor.from_pretrained(CLAP_MODEL_ID)
+        model = ClapModel.from_pretrained(CLAP_MODEL_ID).to(device)
+        model.eval()
+
+        audio = _load_audio(wav_path, sr=48000, full_song=full_song)
+        prompts = [tmpl.format(w) for w, tmpl in VIBE_TAG_PROMPTS]
+
+        a_in = processor(audio=[audio], sampling_rate=48000, return_tensors="pt")
+        a_in = {k: v.to(device) for k, v in a_in.items()}
+        t_in = processor(text=prompts, return_tensors="pt", padding=True)
+        t_in = {k: v.to(device) for k, v in t_in.items()}
+
+        with torch.no_grad():
+            audio_feat = model.get_audio_features(**a_in)
+            text_feat = model.get_text_features(**t_in)
+
+        audio_np = _embed_to_numpy(audio_feat).reshape(-1)
+        text_np = _embed_to_numpy(text_feat)
+        return audio_np, text_np
+    except Exception as exc:
+        logger.warning("vibe_tags: CLAP path failed (%s)", exc)
+        return None
+
+
+def _embed_to_numpy(raw) -> np.ndarray:
+    """Unwrap a transformers CLAP feature output to a numpy array."""
+    if hasattr(raw, "audio_embeds"):
+        raw = raw.audio_embeds
+    elif hasattr(raw, "text_embeds"):
+        raw = raw.text_embeds
+    elif hasattr(raw, "pooler_output"):
+        raw = raw.pooler_output
+    return raw.detach().cpu().numpy()
 
 
 def _rank_tags(
