@@ -11,18 +11,17 @@ import time
 import uuid
 import json
 import logging
+import shutil
 from pathlib import Path
 
-# Ensure ffmpeg and venv-installed tools (yt-dlp, demucs) are on PATH
+# venv-installed tools (yt-dlp, demucs) resolve when run via the venv Python
+# without an activated shell. FFmpeg is expected on PATH (see README); set the
+# FFMPEG_BIN env var to its bin directory if it lives somewhere off PATH.
 VENV_SCRIPTS = str(Path(__file__).parent / ".venv" / "Scripts")
-FFMPEG_BIN = (
-    r"C:\Users\ROOP\AppData\Local\Microsoft\WinGet\Packages"
-    r"\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe"
-    r"\ffmpeg-8.1-full_build\bin"
-)
-os.environ["PATH"] = (
-    VENV_SCRIPTS + os.pathsep + FFMPEG_BIN + os.pathsep + os.environ.get("PATH", "")
-)
+_extra_paths = [VENV_SCRIPTS]
+if os.environ.get("FFMPEG_BIN"):
+    _extra_paths.append(os.environ["FFMPEG_BIN"])
+os.environ["PATH"] = os.pathsep.join(_extra_paths + [os.environ.get("PATH", "")])
 
 # Setup logging - redirecting logs to stderr to leave stdout clean for JSON
 logging.basicConfig(
@@ -149,6 +148,13 @@ def main():
                         help="Print full JSON but omit the 512-float vibe_vector array.")
     
     args = parser.parse_args()
+
+    if shutil.which("ffmpeg") is None:
+        sys.stderr.write(
+            "Error: FFmpeg not found on PATH. Install FFmpeg, or set the "
+            "FFMPEG_BIN environment variable to its bin directory.\n"
+        )
+        sys.exit(1)
 
     start_time = time.time()
     

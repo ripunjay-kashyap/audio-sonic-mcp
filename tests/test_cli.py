@@ -7,16 +7,12 @@ import subprocess
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-# Setup path bootstrap for tests
-VENV_SCRIPTS = str(Path(__file__).parent.parent / ".venv" / "Scripts")
-FFMPEG_BIN = (
-    r"C:\Users\ROOP\AppData\Local\Microsoft\WinGet\Packages"
-    r"\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe"
-    r"\ffmpeg-8.1-full_build\bin"
-)
-os.environ["PATH"] = (
-    VENV_SCRIPTS + os.pathsep + FFMPEG_BIN + os.pathsep + os.environ.get("PATH", "")
-)
+# FFmpeg is expected on PATH; honor an optional FFMPEG_BIN override like the CLI.
+_VENV_SCRIPTS = str(Path(__file__).parent.parent / ".venv" / "Scripts")
+_extra = [_VENV_SCRIPTS]
+if os.environ.get("FFMPEG_BIN"):
+    _extra.append(os.environ["FFMPEG_BIN"])
+os.environ["PATH"] = os.pathsep.join(_extra + [os.environ.get("PATH", "")])
 
 from pipeline.ingestion import validate_file_path, validate_file_source
 from pipeline.converter import convert_to_wav
