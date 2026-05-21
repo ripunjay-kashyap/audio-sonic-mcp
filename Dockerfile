@@ -2,7 +2,9 @@
 FROM mwader/static-ffmpeg:6.1 AS ffmpeg
 
 # Stage 2: Final runtime environment
-FROM python:3.10-slim
+# 3.12 matches the dev/test env the deps were pinned against (requirements.txt
+# pins numpy==2.4.4, which requires Python >= 3.11).
+FROM python:3.12-slim
 
 # Prevent Python from buffering stdout/stderr
 ENV PYTHONUNBUFFERED=1
@@ -35,8 +37,13 @@ COPY --from=ffmpeg /ffprobe /usr/local/bin/
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 2. Install CPU-only torch/transformers for optional CLAP vibe vector (~4 GB)
-RUN pip install --no-cache-dir torch torchaudio transformers --index-url https://download.pytorch.org/whl/cpu
+# 2. CPU-only torch/torchaudio from the PyTorch wheel index (Demucs + CLAP run on
+#    these). Pinned to the versions the project is tested against.
+RUN pip install --no-cache-dir torch==2.11.0 torchaudio==2.11.0 --index-url https://download.pytorch.org/whl/cpu
+# 3. Demucs (stem separation) + transformers (CLAP) from PyPI — torch already
+#    satisfied above. transformers is NOT on the PyTorch index, so it must come
+#    from PyPI; a single --index-url command would fail to find it.
+RUN pip install --no-cache-dir demucs==4.0.1 transformers==5.8.0
 
 # Create mount-point directories and hand ownership to appuser
 RUN mkdir -p /app/jobs /app/models/torch /app/models/huggingface && \

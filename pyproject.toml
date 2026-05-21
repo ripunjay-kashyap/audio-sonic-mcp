@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "audio-sonic-mcp"
-version = "2.0.0"
+version = "1.0.0"
 description = "MCP server that returns a structured sonic signature (BPM, key, CLAP embedding) for any YouTube URL"
 requires-python = ">=3.10"
 dependencies = [
@@ -18,10 +18,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Optional ML stack: Demucs stem separation + CLAP vibe vector/tags. Without it
+# the pipeline still runs (HPSS fallback for separation, librosa composite for
+# the vibe vector, no vibe_tags), just at lower quality.
 clap = [
     "torch>=2.0.0",
     "torchaudio>=2.0.0",
     "transformers>=4.38.0",
+    "demucs>=4.0.1",
 ]
 dev = [
     "pytest==8.3.5",
