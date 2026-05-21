@@ -135,6 +135,30 @@ def _librosa_fallback_vector(wav_path: Path, full_song: bool = False) -> list[fl
     return [round(float(v), 6) for v in arr]
 
 
+# ── Vibe tags (CLAP zero-shot) ──────────────────────────────────────────────
+
+
+def _rank_tags(
+    audio_emb: np.ndarray,
+    text_embs: np.ndarray,
+    labels: list[str],
+    top_n: int,
+    floor: float,
+) -> list[str]:
+    """Rank labels by cosine similarity of their text embeddings to the audio
+    embedding. Keep those at/above ``floor``, capped at ``top_n``. If nothing
+    clears the floor, return the single highest-ranked label (CLAP still ran)."""
+    a = audio_emb / (np.linalg.norm(audio_emb) or 1.0)
+    t = text_embs / (np.linalg.norm(text_embs, axis=1, keepdims=True) + 1e-9)
+    sims = t @ a  # (N,)
+    order = np.argsort(sims)[::-1]
+    ranked = [(labels[i], float(sims[i])) for i in order]
+    kept = [w for w, s in ranked if s >= floor][:top_n]
+    if not kept:
+        kept = [ranked[0][0]]
+    return kept
+
+
 # ── Shared utility ────────────────────────────────────────────────────────────
 
 

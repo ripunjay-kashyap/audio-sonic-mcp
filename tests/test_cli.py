@@ -1,4 +1,5 @@
 import os
+import numpy as np
 import sys
 import json
 import pytest
@@ -133,3 +134,30 @@ class TestCLISubprocess:
         # Check out file was written
         assert out_json.exists()
         assert json.loads(out_json.read_text(encoding="utf-8")) == parsed
+
+
+class TestRankTags:
+    def test_orders_by_similarity_and_applies_floor(self):
+        from pipeline.vectorizer import _rank_tags
+        text = np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=float)
+        labels = ["a", "b", "c"]
+        audio = np.array([0.3, 0.9, -0.2], dtype=float)  # sims: a=.31 b=.92 c=-.21
+        out = _rank_tags(audio, text, labels, top_n=5, floor=0.0)
+        assert out == ["b", "a"]  # c dropped by floor 0.0 (negative sim)
+
+    def test_returns_top1_when_all_below_floor(self):
+        from pipeline.vectorizer import _rank_tags
+        text = np.eye(3)
+        labels = ["a", "b", "c"]
+        audio = np.array([0.1, 0.2, 0.05], dtype=float)
+        out = _rank_tags(audio, text, labels, top_n=5, floor=0.9)
+        assert out == ["b"]  # nothing clears 0.9 -> top-1 returned
+
+    def test_respects_top_n_cap(self):
+        from pipeline.vectorizer import _rank_tags
+        text = np.eye(4)
+        labels = ["a", "b", "c", "d"]
+        audio = np.array([0.4, 0.3, 0.2, 0.1], dtype=float)
+        out = _rank_tags(audio, text, labels, top_n=2, floor=0.0)
+        assert out == ["a", "b"]
+
