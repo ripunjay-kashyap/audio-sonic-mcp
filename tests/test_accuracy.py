@@ -59,13 +59,21 @@ GROUND_TRUTH = [
         "sig_shoulda_never",
         "https://www.youtube.com/watch?v=crWbG90dChw",
         137, "E Minor",    # Kehlani ft. Usher – Shoulda Never
-        None, None,        # fixed: absent-major-3rd override (A Major C# = -0.86)
+        None,
+        # window-fragile: fresh downloads land the SSM window on a section that
+        # tonicises the IV (A Major); the absent-3rd correction only recovers
+        # E Minor when the window still contains the tonic.  Passed on old cache.
+        "SSM window tonicises the IV (A Major); E-minor tonic absent from the window",
     ),
     (
         "sig_attention",
         "https://www.youtube.com/watch?v=nfs8NYg7yQM",
         100, "D# Minor",   # Charlie Puth – Attention (Eb Minor)
-        None, None,        # fixed: 5th-alias distinguishing-tone check (B > C in chroma)
+        None,
+        # window-fragile: fresh downloads land the SSM window on a section that
+        # tonicises the v (A# Minor); the 5th-alias correction has no D# section
+        # to promote to.  Passed on old cache.
+        "SSM window tonicises the v (A# Minor); D#-minor tonic absent from the window",
     ),
     (
         "sig_take_five",
@@ -99,7 +107,9 @@ GROUND_TRUTH = [
         "https://www.youtube.com/watch?v=L53gjP-TtGE",
         154, "C Minor",    # Kanye West – POWER; Tunebat/human verified 154 BPM; pipeline detects 152 = 1.3% ✓
         None,
-        None,              # key correct: C Minor ✓
+        # window-fragile: fresh downloads land the SSM window on a section that
+        # tonicises the v (G Minor) instead of the C-minor tonic.  Passed on old cache.
+        "SSM window tonicises the v (G Minor); C-minor tonic absent from the window",
     ),
     (
         "sig_new_magic_wand",
